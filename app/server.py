@@ -71,6 +71,10 @@ class ApiServer(ThreadingHTTPServer):
         self.cover_dir = Path(config.COVER_DIR)
         self.service = ScrapeService(self.db_path)
         self.download_service = DownloadService(self.db_path)
+        # 启动时恢复上次保存的代理开关（云服务器上通常关闭代理直连）
+        saved = db.get_setting("proxy_enabled", "", self.db_path)
+        if saved != "":
+            config.set_proxy_enabled(saved not in ("0", "false", "no"))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -230,6 +234,8 @@ class Handler(BaseHTTPRequestHandler):
             "cover_dir": str(config.COVER_DIR),
             "download_dir": str(config.DOWNLOADS_DIR),
             "site_origin": db.get_site_origin(self.server.db_path),
+            "proxy_enabled": config.PROXY_ENABLED,
+            "proxy_address": config.PROXY,
             "batches": db.list_batches(self.server.db_path),
             "download_status": self.server.download_service.snapshot(),
             "stats": db.stats(self.server.db_path),
@@ -454,6 +460,15 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/scrape/cancel":
                 cancelled = self.server.service.cancel()
                 self._json({"ok": True, "cancelled": cancelled, **self.server.service.snapshot()})
+            elif path == "/api/settings/proxy":
+                payload = self._read_json()
+                if payload is None:
+                    return
+                enabled = bool(payload.get("enabled", True))
+                config.set_proxy_enabled(enabled)
+                db.set_setting("proxy_enabled", "1" if enabled else "0", self.server.db_path)
+                self._json({"ok": True, "proxy_enabled": config.PROXY_ENABLED,
+                            "proxy_address": config.PROXY})
             elif path == "/api/want-download":
                 payload = self._read_json()
                 if payload is None:

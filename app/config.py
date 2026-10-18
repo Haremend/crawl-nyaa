@@ -32,6 +32,21 @@ DEFAULT_PROXY = "http://127.0.0.1:10808"
 _PROXY_ENV = os.environ.get("CLAW_PROXY")
 PROXY = (_PROXY_ENV if _PROXY_ENV is not None else DEFAULT_PROXY).strip()
 
+# 运行时可切换的代理开关（由前端「开启代理」按钮控制，并持久化到数据库）
+# True = 使用上面的代理地址；False = 直连（适合云服务器）
+PROXY_ENABLED = bool(PROXY)
+
+
+def set_proxy_enabled(enabled: bool) -> None:
+    """设置是否使用代理（仅影响后续新建的请求）。"""
+    global PROXY_ENABLED
+    PROXY_ENABLED = bool(enabled) and bool(PROXY)
+
+
+def effective_proxy() -> str:
+    """当前生效的代理地址；返回空字符串表示直连。"""
+    return PROXY if PROXY_ENABLED else ""
+
 USER_AGENT = os.environ.get("CLAW_UA") or (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 claw-gallery/0.1"

@@ -62,7 +62,8 @@ class Fetcher:
         user_agent: str | None = None,
         retries: int | None = None,
     ) -> None:
-        self.proxy = config.PROXY if proxy is None else proxy
+        # 默认跟随运行时的「开启代理」开关；显式传入 proxy 时以传入值为准
+        self.proxy = config.effective_proxy() if proxy is None else proxy
         self.timeout = timeout or config.REQUEST_TIMEOUT
         self.user_agent = user_agent or config.USER_AGENT
         self.retries = max(1, retries or config.REQUEST_RETRIES)

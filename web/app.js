@@ -18,6 +18,7 @@ const state = {
   data: null,
   meta: null,
   saveMode: "server",
+  proxyEnabled: true,
   localCancel: false,
   localRunning: false,
   batchId: "",
@@ -177,7 +178,7 @@ async function loadMeta() {
     $("urlInput").value = meta.default_url;
     state.urlInitialized = true;
   }
-  $("proxyChip").textContent = meta.proxy ? "代理 " + meta.proxy : "未启用代理";
+  renderProxy(meta);
   const parts = ["库内 " + meta.stats.entries + " 条", "去重后 " + meta.stats.works + " 部"];
   if (meta.stats.want_download) parts.push("待下载 " + meta.stats.want_download);
   if (meta.stats.downloaded) parts.push("已下载 " + meta.stats.downloaded);
@@ -230,6 +231,17 @@ function renderBatchOptions() {
   }
   select.innerHTML = options.join("");
   renderBatchInfo();
+}
+
+function renderProxy(meta) {
+  const enabled = meta ? Boolean(meta.proxy_enabled) : true;
+  const address = (meta && (meta.proxy_address || meta.proxy)) || "";
+  state.proxyEnabled = enabled;
+  $("proxyChip").textContent = enabled ? ("代理 " + (address || "已开启")) : "直连（不使用代理）";
+  $("proxyBtn").textContent = enabled ? "代理：开" : "代理：关";
+  $("proxyBtn").title = enabled
+    ? "当前通过代理访问，点击改为直连"
+    : "当前直连（适合云服务器），点击改为走代理";
 }
 
 function renderSaveMode() {
@@ -758,6 +770,25 @@ function bindEvents() {
   };
   $("gateClear").addEventListener("click", () => clearKey("已清除浏览器里保存的 Key"));
   $("changeKeyBtn").addEventListener("click", () => clearKey("已清除保存的 Key，请重新输入"));
+
+  $("proxyBtn").addEventListener("click", async () => {
+    const next = !state.proxyEnabled;
+    $("proxyBtn").disabled = true;
+    try {
+      const data = await api("/api/settings/proxy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: next }),
+      });
+      state.proxyEnabled = Boolean(data.proxy_enabled);
+      renderProxy({ proxy_enabled: data.proxy_enabled, proxy_address: data.proxy_address });
+      toast(state.proxyEnabled ? "已开启代理" : "已关闭代理，改为直连", "ok");
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      $("proxyBtn").disabled = false;
+    }
+  });
 
   document.querySelectorAll(".tab").forEach((btn) => {
     btn.addEventListener("click", () => switchTab(btn.dataset.tab));

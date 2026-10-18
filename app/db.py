@@ -62,6 +62,11 @@ CREATE INDEX IF NOT EXISTS idx_galleries_title_key ON galleries(title_key);
 CREATE INDEX IF NOT EXISTS idx_galleries_language ON galleries(primary_language);
 CREATE INDEX IF NOT EXISTS idx_galleries_last_seen ON galleries(last_seen);
 
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS scrape_runs (
     run_id      INTEGER PRIMARY KEY AUTOINCREMENT,
     url         TEXT NOT NULL,
@@ -991,6 +996,31 @@ def get_site_origin(path: str | Path | None = None) -> str:
         if parts.scheme and parts.netloc:
             return f"{parts.scheme}://{parts.netloc}"
     return ""
+
+
+def get_setting(key: str, default: str = "", path: str | Path | None = None) -> str:
+    """读取全局设置（不存在时返回默认值）。"""
+    conn = connect(path)
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (str(key),)).fetchone()
+        return str(row[0]) if row else default
+    finally:
+        conn.close()
+
+
+def set_setting(key: str, value: str, path: str | Path | None = None) -> None:
+    """写入全局设置。"""
+    with _WRITE_LOCK:
+        conn = connect(path)
+        try:
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(key), str(value)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def list_batches(path: str | Path | None = None, limit: int = 100) -> list[dict]:

@@ -56,6 +56,11 @@ class ScriptGuardTests(unittest.TestCase):
         for field in ("item.title", "item.title_original"):
             self.assertIn("esc(" + field + ")", self.js, f"{field} 应使用 esc() 转义")
 
+    def test_proxy_toggle_wired(self):
+        html = HTML.read_text(encoding="utf-8")
+        self.assertIn('id="proxyBtn"', html, "顶部应有代理开关按钮")
+        self.assertIn("/api/settings/proxy", self.js, "代理开关应调用后端接口")
+
     def test_no_brand_leak_in_assets(self):
         for path in (CSS, JS, HTML):
             text = path.read_text(encoding="utf-8").lower()
