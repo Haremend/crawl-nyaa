@@ -120,5 +120,74 @@ class ProxyEndpointTests(unittest.TestCase):
             server2.server_close()
 
 
+class ScrapeProxyTests(unittest.TestCase):
+    """抓取任务必须跟随代理开关。
+
+    历史 bug：ScrapeService 里写成 Fetcher(proxy=config.PROXY)，
+    显式传了代理地址，于是页面关掉代理后抓取仍然走代理（报 407）。
+    """
+
+    def setUp(self):
+        self.original = config.PROXY_ENABLED
+        self.tmp = make_temp_dir("scrapeproxy")
+        self.db_path = self.tmp / "t.sqlite3"
+
+    def tearDown(self):
+        config.set_proxy_enabled(self.original)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run_fake_scrape(self):
+        import time
+
+        from app import service as service_module
+        from app.parser import GalleryItem
+        from app.scraper import PageResult
+        from app.service import ScrapeService
+
+        seen = {}
+
+        class SpyFetcher(Fetcher):
+            def __init__(self, proxy=None, **kwargs):
+                seen["proxy_arg"] = proxy
+                super().__init__(proxy, **kwargs)
+                seen["proxy"] = self.proxy
+
+        def fake_iter_pages(url, **_kwargs):
+            yield PageResult(
+                page_no=1,
+                url=url,
+                items=[GalleryItem(gallery_id=1, url="https://example.net/g/1/", title="x")],
+                last_page=1,
+                has_next=False,
+            )
+
+        original_fetcher = service_module.Fetcher
+        original_iter = service_module.iter_pages
+        service_module.Fetcher = SpyFetcher
+        service_module.iter_pages = fake_iter_pages
+        try:
+            service = ScrapeService(self.db_path)
+            service.start("https://example.net/group/x/", max_pages=1, enrich=False, covers=False)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and service.snapshot()["running"]:
+                time.sleep(0.05)
+        finally:
+            service_module.Fetcher = original_fetcher
+            service_module.iter_pages = original_iter
+        return seen
+
+    def test_scrape_uses_no_proxy_when_disabled(self):
+        config.set_proxy_enabled(False)
+        seen = self._run_fake_scrape()
+        self.assertEqual(seen.get("proxy"), "", "代理关闭时抓取任务不应使用代理")
+        self.assertIsNone(seen.get("proxy_arg"),
+                          "抓取任务不应显式传 proxy，否则会绕过「开启代理」开关")
+
+    def test_scrape_uses_proxy_when_enabled(self):
+        config.set_proxy_enabled(True)
+        seen = self._run_fake_scrape()
+        self.assertEqual(seen.get("proxy"), config.PROXY)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -589,7 +589,8 @@ def run_server(host: str | None = None, port: int | None = None, *,
     url = f"http://{host}:{server.server_address[1]}/"
     print("claw-gallery 已启动：", url)
     print("SQLite 数据文件：", Path(server.db_path))
-    print("抓取代理：", config.PROXY or "未启用（CLAW_PROXY 为空）")
+    effective = config.effective_proxy()
+    print("抓取代理：", effective if effective else "直连（未使用代理）")
     print("按 Ctrl+C 停止服务")
     if open_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()

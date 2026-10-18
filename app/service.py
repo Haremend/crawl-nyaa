@@ -116,7 +116,9 @@ class ScrapeService:
                 "max_pages": pages,
                 "delay": delay_value,
             }
-            self._log(f"开始抓取：{clean_url}（代理 {config.PROXY or '未启用'}）")
+            effective = config.effective_proxy()
+            proxy_note = f"代理 {effective}" if effective else "直连（未使用代理）"
+            self._log(f"开始抓取：{clean_url}（{proxy_note}）")
             if enrich_enabled:
                 self._log("已开启详情补全：调用 /api/v2/galleries/{id} 获取原始标题（精确去重）与完整标签")
             else:
@@ -258,7 +260,9 @@ class ScrapeService:
         status = "done"
         error: str | None = None
         try:
-            fetcher = Fetcher(proxy=config.PROXY)
+            # 不要显式传 proxy：让 Fetcher 走 config.effective_proxy()，
+            # 否则会绕过页面的「开启代理」开关
+            fetcher = Fetcher()
             for page in iter_pages(
                 url,
                 max_pages=max_pages,

@@ -52,7 +52,9 @@
 
 - `Fetcher` 默认走 `config.effective_proxy()`：代理开关关闭时返回空字符串 → **直连**
 - 开关状态存在 `settings` 表（键 `proxy_enabled`），服务启动时自动恢复
-- 新增任何出网代码时，都要走 `Fetcher`，不要自己拼 `ProxyHandler`，否则会绕开这个开关
+- 新增任何出网代码时，都要用 `Fetcher()`（**不要显式传 `proxy=`**，也不要自己拼 `ProxyHandler`），否则会绕开这个开关
+- 历史 bug：`ScrapeService` 里写成 `Fetcher(proxy=config.PROXY)`，导致页面关掉代理后抓取仍走代理并报 407；
+  回归测试在 `tests/test_proxy.py::ScrapeProxyTests`
 
 ### 1.5 上游接口的 Key 使用规则
 
