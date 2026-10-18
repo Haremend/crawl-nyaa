@@ -90,6 +90,10 @@ class ScrapeService:
             covers_on = self._bool_option(covers, config.COVER_DEFAULT)
 
             site_domain = urlsplit(clean_url).hostname or ""
+            # 抓取时把站点地址同步进设置，和门禁里填的域名保持一致
+            if site_domain:
+                db.set_setting("site_origin",
+                               f"{urlsplit(clean_url).scheme}://{site_domain}", self.db_path)
             run_id = db.create_run(clean_url, self.db_path)
             self._cancel = threading.Event()
             self._logs.clear()
@@ -199,7 +203,7 @@ class ScrapeService:
             time.sleep(step)
             remaining -= step
 
-    def _download_page_covers(self, fetcher: Fetcher, page) -> tuple[int, int]:
+    def _download_page_covers(self, fetcher: Fetcher, page, site_domain: str = "") -> tuple[int, int]:
         """为当前页缺少本地封面的条目下载封面，返回 (成功数, 失败数)。"""
         ids = [item.gallery_id for item in page.items]
         pending = db.ids_needing_cover(ids, self.db_path)
@@ -227,7 +231,8 @@ class ScrapeService:
             self._cover_pause()
         return done, failed
 
-    def _enrich_page(self, fetcher: Fetcher, page, log_prefix: str = "") -> tuple[int, int, int]:
+    def _enrich_page(self, fetcher: Fetcher, page, site_domain: str = "",
+                     log_prefix: str = "") -> tuple[int, int, int]:
         """为缺少详情的条目补全数据，返回 (处理数, 成功数, 失败数)。"""
         ids = [item.gallery_id for item in page.items]
         pending = db.ids_needing_detail(ids, self.db_path)
@@ -291,7 +296,8 @@ class ScrapeService:
                 )
                 if enrich:
                     batch_total, batch_done, batch_failed = self._enrich_page(
-                        fetcher, page, log_prefix=f"第 {page.page_no} 页"
+                        fetcher, page, site_domain=site_domain,
+                        log_prefix=f"第 {page.page_no} 页"
                     )
                     details_total += batch_total
                     details_done += batch_done
@@ -302,7 +308,8 @@ class ScrapeService:
                         details_failed=details_failed,
                     )
                 if covers_on:
-                    batch_done, batch_failed = self._download_page_covers(fetcher, page)
+                    batch_done, batch_failed = self._download_page_covers(
+                        fetcher, page, site_domain=site_domain)
                     covers_done += batch_done
                     covers_failed += batch_failed
                     self._progress(covers_done=covers_done, covers_failed=covers_failed)

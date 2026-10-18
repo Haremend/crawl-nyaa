@@ -56,7 +56,17 @@
 - 历史 bug：`ScrapeService` 里写成 `Fetcher(proxy=config.PROXY)`，导致页面关掉代理后抓取仍走代理并报 407；
   回归测试在 `tests/test_proxy.py::ScrapeProxyTests`
 
-### 1.5 上游接口的 Key 使用规则
+### 1.5 站点地址只能来自这三处
+
+代码里**不得写入固定域名**。站点地址按以下顺序解析（`db.get_site_origin()`）：
+
+1. 前端门禁里填写的域名（`settings.site_origin`）
+2. 环境变量 `CLAW_API_ORIGIN`
+3. 最近一次抓取的列表页 URL / 库内作品链接推导
+
+抓取时会把推导出的地址同步回设置，保证与前端填写的一致。
+
+### 1.6 上游接口的 Key 使用规则
 
 用户明确要求：**上游接口不需要 Key 的就不要带 Key。**
 

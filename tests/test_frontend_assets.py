@@ -98,10 +98,15 @@ class ScriptGuardTests(unittest.TestCase):
         self.assertIn('id="setupHint"', html, "应有首次部署引导提示")
         self.assertIn("renderSetupHint", self.js)
 
-    def test_no_brand_leak_in_assets(self):
+    def test_no_credential_leak_in_assets(self):
+        """前端资源里不应出现凭据相关的字样。
+
+        品牌词**故意不写在这里** —— 写了就等于把站点名写进仓库，
+        与 AGENTS.md 第 1.1 条冲突。品牌自查请按 AGENTS.md §9 手动执行。
+        """
         for path in (CSS, JS, HTML):
             text = path.read_text(encoding="utf-8").lower()
-            for token in ("nhentai", "cf_clearance", "access_token="):
+            for token in ("cf_clearance", "access_token=", "refresh_token="):
                 self.assertNotIn(token, text, f"{path.name} 不应包含 {token}")
 
 

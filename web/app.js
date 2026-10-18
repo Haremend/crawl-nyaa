@@ -39,6 +39,7 @@ const $ = (id) => document.getElementById(id);
  * API Key：cookie 存取 + 门禁
  * ================================================================== */
 const KEY_COOKIE = "claw_api_key";
+const SITE_COOKIE = "claw_site_origin";
 
 function readCookie(name) {
   const target = name + "=";
@@ -63,6 +64,11 @@ function deleteCookie(name) {
 function initApiKey() {
   const params = new URLSearchParams(window.location.search);
   const fromUrl = (params.get("apikey") || "").trim();
+  const domainFromUrl = (params.get("domain") || "").trim();
+  if (domainFromUrl) {
+    writeCookie(SITE_COOKIE, domainFromUrl);
+    params.delete("domain");
+  }
   if (fromUrl) {
     writeCookie(KEY_COOKIE, fromUrl);
     params.delete("apikey");
@@ -71,6 +77,19 @@ function initApiKey() {
     window.history.replaceState(null, "", clean);   // 避免 Key 留在历史记录里
   }
   state.key = fromUrl || readCookie(KEY_COOKIE);
+}
+
+function renderSiteChip(origin) {
+  const value = (origin || "").trim();
+  $("siteChip").textContent = value ? ("站点 " + value.replace(/^https?:\/\//, "")) : "站点 未设置";
+  $("siteChip").title = value || "尚未设置站点域名";
+}
+
+function prefillGate(meta) {
+  const origin = (meta && meta.site_origin) || readCookie(SITE_COOKIE) || "";
+  $("gateDomain").value = origin;
+  $("gateInput").value = "";
+  if (origin) { $("gateInput").focus(); } else { $("gateDomain").focus(); }
 }
 
 function showGate(message) {
@@ -93,17 +112,40 @@ function hideGate() {
  * Key 是否正确，等真正用到（收藏列表 / 下载）时再报错。
  */
 async function submitGate() {
-  const value = ($("gateInput").value || "").trim();
-  if (!value) { toast("请输入 API Key", "error"); return; }
-  state.key = value;
-  writeCookie(KEY_COOKIE, value);
+  const domain = ($("gateDomain").value || "").trim();
+  const key = ($("gateInput").value || "").trim();
+  if (!domain) { toast("请输入站点域名", "error"); $("gateDomain").focus(); return; }
+  if (!key) { toast("请输入 API Key", "error"); $("gateInput").focus(); return; }
+
+  $("gateBtn").disabled = true;
+  // 1) 域名保存到服务端（后端访问站点接口要用），只做格式校验
+  try {
+    const data = await api("/api/settings/site", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ origin: domain }),
+    });
+    state.siteOrigin = data.site_origin || "";
+    writeCookie(SITE_COOKIE, state.siteOrigin);
+    renderSiteChip(state.siteOrigin);
+  } catch (error) {
+    toast("域名无效：" + error.message, "error");
+    $("gateHint").textContent = "域名校验失败：" + error.message;
+    $("gateBtn").disabled = false;
+    return;
+  }
+
+  // 2) API Key 只存浏览器，不在这里校验（此时可能还没抓过任何数据）
+  state.key = key;
+  writeCookie(KEY_COOKIE, key);
   hideGate();
-  toast("API Key 已保存到浏览器", "ok");
+  toast("已保存域名与 API Key", "ok");
   try {
     await reloadAll();
   } catch (error) {
-    // 首次部署时数据库为空 / 还没抓过站点，属于正常情况，不拦人
     $("gateHint").textContent = "提示：" + error.message;
+  } finally {
+    $("gateBtn").disabled = false;
   }
 }
 
@@ -228,6 +270,7 @@ async function loadMeta() {
   if (meta.download_dir) $("dlDirHint").textContent = meta.download_dir;
   renderLastRun(meta.stats.last_run);
   renderDownloadSummary(meta.download_status);
+  renderSiteChip(meta.site_origin);
   state.batches = meta.batches || [];
   renderBatchOptions();
   renderSetupHint(meta);
@@ -992,15 +1035,16 @@ function bindEvents() {
   bindEvents();
   renderSaveMode();
   initApiKey();
+  // meta 是公开接口：先取一次，用于预填门禁里的域名
+  await loadMeta().catch(() => {});
   if (!state.key) {
+    prefillGate(state.meta);
     showGate();
     return;
   }
   try {
-    await loadMeta();
     await loadWorks();
   } catch (error) {
-    if (!state.key) return;
     toast("加载失败：" + error.message, "error");
   }
 })();

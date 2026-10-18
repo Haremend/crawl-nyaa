@@ -62,12 +62,14 @@
 
 ### 5. 站点账号（API Key）
 
-- **门禁**：未填 API Key 时页面只显示输入框；可用 `?apikey=xxx` 直接进入（进入后自动从地址栏移除）
+- **门禁**：首次进入需填写 **站点域名 + API Key**；也可用 `?domain=example.com&apikey=xxx` 直接进入（进入后自动从地址栏移除）
+  - 域名保存在服务端设置里（后端访问站点接口需要它），只做格式校验，不联网校验
+  - API Key 只存浏览器 cookie，**提交时不校验**，等真正用到（收藏列表 / 下载）才报错
 - Key 保存在**浏览器 cookie**，前端每次请求通过 `X-API-Key` 头带给后端
 - 后端**不保存 Key**，且只在**需要认证的上游接口**（收藏列表、下载）才带上；
   公开接口（详情、标签等）**不带 Key**
 - **我的收藏 tab**：用你的 Key 读取站点账号收藏列表，卡片风格与排序规则和作品库一致
-- 上游站点地址不写死在代码里：可用 `CLAW_API_ORIGIN` 指定，否则自动取最近一次抓取的列表页地址
+- 上游站点地址取值顺序：**前端填写的域名** > `CLAW_API_ORIGIN` > 最近一次抓取的列表页 > 库内作品链接
 
 ### 6. 界面
 
@@ -144,6 +146,7 @@ claw-gallery/
 | POST | `/api/download/cancel` | 停止批量下载 |
 | GET | `/api/site-favorites` | 站点账号收藏列表（需 Key），同步进本地库后按默认规则排序 |
 | GET | `/api/download/targets` | 批量下载的目标列表（`mode=want` 或 `mode=batch&batch_id=N`），供浏览器端循环下载 |
+| POST | `/api/settings/site` | 设置站点域名，JSON：`{"origin": "example.com"}`（规范化为 `https://example.com`） |
 | POST | `/api/settings/proxy` | 切换是否走代理，JSON：`{"enabled": false}`（关闭=直连） |
 | POST | `/api/reset` | 清空作品与抓取记录 |
 

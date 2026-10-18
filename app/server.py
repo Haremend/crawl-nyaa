@@ -26,6 +26,30 @@ def _download_filename(gallery_id: int, fmt: str) -> str:
     return f"{int(gallery_id)}.{ext}"
 
 
+def normalize_origin(raw: str) -> str:
+    """把用户填写的域名规范成 https://host[:port]；无效时返回空字符串。"""
+    text = (raw or "").strip().rstrip("/")
+    if not text:
+        return ""
+    if not text.lower().startswith(("http://", "https://")):
+        text = "https://" + text
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return ""
+    host = (parts.hostname or "").strip().lower()
+    if not host:
+        return ""
+    if "." not in host and host != "localhost":
+        return ""
+    scheme = parts.scheme if parts.scheme in ("http", "https") else "https"
+    try:
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        return ""
+    return f"{scheme}://{host}{port}"
+
+
 def thumb_proxy_path(url: str) -> str:
     """把远端缩略图 URL 转成本地代理路径。"""
     if not url:
@@ -460,6 +484,16 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/scrape/cancel":
                 cancelled = self.server.service.cancel()
                 self._json({"ok": True, "cancelled": cancelled, **self.server.service.snapshot()})
+            elif path == "/api/settings/site":
+                payload = self._read_json()
+                if payload is None:
+                    return
+                origin = normalize_origin(str(payload.get("origin") or ""))
+                if not origin:
+                    self._error("域名格式不正确，例如 example.com", 400)
+                    return
+                db.set_setting("site_origin", origin, self.server.db_path)
+                self._json({"ok": True, "site_origin": origin})
             elif path == "/api/settings/proxy":
                 payload = self._read_json()
                 if payload is None:

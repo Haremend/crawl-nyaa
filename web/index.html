@@ -13,7 +13,14 @@
 <div class="gate" id="gate" hidden>
   <div class="gate-card">
     <h2>需要 API Key</h2>
-    <p class="gate-desc">本工具通过 API Key 访问站点接口。Key 仅保存在你自己的浏览器 cookie 中，不会写入服务端。</p>
+    <p class="gate-desc">
+      填写要抓取站点的<strong>域名</strong>与你的 <strong>API Key</strong> 即可进入。<br>
+      域名保存在服务端（后端访问站点接口需要它）；API Key 只保存在你自己的浏览器 cookie 中，不会写入服务端磁盘。
+    </p>
+    <label class="field">
+      <span>站点域名</span>
+      <input id="gateDomain" type="text" spellcheck="false" placeholder="例如 example.com（可带 http:// 或端口）" autocomplete="off">
+    </label>
     <label class="field">
       <span>API Key</span>
       <input id="gateInput" type="password" spellcheck="false" placeholder="在此粘贴 API Key" autocomplete="off">
@@ -39,6 +46,7 @@
   </div>
   <div class="meta-chips">
     <span class="meta-chip" id="proxyChip">代理</span>
+    <span class="meta-chip" id="siteChip" title="当前使用的站点地址">站点</span>
     <span class="meta-chip" id="dbChip" title="">SQLite</span>
     <span class="meta-chip" id="lastRunChip">暂无抓取记录</span>
     <button class="meta-chip meta-btn" id="proxyBtn" title="切换是否通过本地代理访问（云服务器可关闭直连）">代理：开</button>

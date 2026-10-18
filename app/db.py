@@ -969,7 +969,16 @@ def set_downloaded(gallery_ids: Sequence[int], downloaded: bool,
 
 
 def get_site_origin(path: str | Path | None = None) -> str:
-    """推导上游站点地址：环境变量 > 最近抓取的列表页 > 库内任一作品链接。"""
+    """上游站点地址的取值顺序：
+
+    1. 前端在门禁里填写的域名（settings.site_origin，最优先）
+    2. 环境变量 CLAW_API_ORIGIN
+    3. 最近一次抓取的列表页 URL 推导
+    4. 库内任一作品链接推导
+    """
+    saved = get_setting("site_origin", "", path).strip()
+    if saved:
+        return saved.rstrip("/")
     if config.API_ORIGIN:
         return config.API_ORIGIN.rstrip("/")
     candidates: list[str] = []
