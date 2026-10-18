@@ -79,6 +79,25 @@ class ScriptGuardTests(unittest.TestCase):
         self.assertIn('api("/api/scrape/status", { silent: true })', self.js)
         self.assertIn('api("/api/download/status", { silent: true })', self.js)
 
+    def test_gate_does_not_validate_on_submit(self):
+        """门禁提交时不得发起校验请求。
+
+        历史 bug：全新部署还没有站点地址，提交 Key 时校验 /api/site-favorites
+        会返回「未知站点地址」，导致第一次根本进不去。
+        """
+        start = self.js.index("async function submitGate")
+        end = self.js.index("function esc(", start)
+        body = self.js[start:end]
+        self.assertNotIn("fetch(", body, "submitGate 里不应有网络请求")
+        self.assertNotIn("site-favorites", body, "submitGate 不应校验 Key")
+        self.assertIn("writeCookie", body, "submitGate 应把 Key 存进 cookie")
+        self.assertIn("hideGate()", body, "submitGate 应关闭门禁")
+
+    def test_setup_hint_for_first_deploy(self):
+        html = HTML.read_text(encoding="utf-8")
+        self.assertIn('id="setupHint"', html, "应有首次部署引导提示")
+        self.assertIn("renderSetupHint", self.js)
+
     def test_no_brand_leak_in_assets(self):
         for path in (CSS, JS, HTML):
             text = path.read_text(encoding="utf-8").lower()

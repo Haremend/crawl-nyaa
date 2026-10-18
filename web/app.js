@@ -84,24 +84,26 @@ function hideGate() {
   $("gate").hidden = true;
 }
 
+/**
+ * 保存 API Key 并进入。
+ *
+ * 注意：这里**不做任何校验**。全新部署时还没有任何站点地址，
+ * 任何需要站点信息的接口都会失败（例如 /api/site-favorites 会返回
+ * 「未知站点地址」），如果在这里校验就会导致第一次根本进不去。
+ * Key 是否正确，等真正用到（收藏列表 / 下载）时再报错。
+ */
 async function submitGate() {
   const value = ($("gateInput").value || "").trim();
   if (!value) { toast("请输入 API Key", "error"); return; }
-  $("gateBtn").disabled = true;
+  state.key = value;
+  writeCookie(KEY_COOKIE, value);
+  hideGate();
+  toast("API Key 已保存到浏览器", "ok");
   try {
-    const response = await fetch("/api/site-favorites?page=1", { headers: { "X-API-Key": value } });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || ("HTTP " + response.status));
-    state.key = value;
-    writeCookie(KEY_COOKIE, value);
-    hideGate();
-    toast("API Key 校验通过", "ok");
     await reloadAll();
   } catch (error) {
-    toast("Key 无效：" + error.message, "error");
-    $("gateHint").textContent = "校验失败：" + error.message;
-  } finally {
-    $("gateBtn").disabled = false;
+    // 首次部署时数据库为空 / 还没抓过站点，属于正常情况，不拦人
+    $("gateHint").textContent = "提示：" + error.message;
   }
 }
 
@@ -228,6 +230,7 @@ async function loadMeta() {
   renderDownloadSummary(meta.download_status);
   state.batches = meta.batches || [];
   renderBatchOptions();
+  renderSetupHint(meta);
   if (meta.scrape && meta.scrape.running) startPolling();
   else if (meta.scrape && ["done", "cancelled", "error"].includes(meta.scrape.status)) renderProgress(meta.scrape);
 }
@@ -270,6 +273,24 @@ function renderBatchOptions() {
   }
   select.innerHTML = options.join("");
   renderBatchInfo();
+}
+
+/** 首次部署引导：还没有站点地址时，告诉用户先做什么。 */
+function renderSetupHint(meta) {
+  const box = $("setupHint");
+  if (!meta) { box.hidden = true; return; }
+  const hasSite = Boolean(meta.site_origin);
+  const hasData = (meta.stats && meta.stats.entries > 0) || (meta.batches || []).length > 0;
+  if (!hasSite && !hasData) {
+    box.innerHTML = "首次使用：把要抓的<strong>列表页 URL</strong> 粘到上面的输入框，点击「开始抓取」。"
+      + "抓取一次后才会知道站点地址，届时「我的收藏」与下载功能即可使用。";
+    box.hidden = false;
+  } else if (!hasSite) {
+    box.innerHTML = "还没有站点地址：再抓取一次列表页即可（收藏与下载需要它）。";
+    box.hidden = false;
+  } else {
+    box.hidden = true;
+  }
 }
 
 function renderProxy(meta) {

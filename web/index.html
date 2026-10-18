@@ -22,7 +22,10 @@
       <button id="gateBtn" class="btn primary">确定进入</button>
       <button id="gateClear" class="btn ghost">清除已保存的 Key</button>
     </div>
-    <p class="gate-hint" id="gateHint">也可以用 <code>?apikey=你的KEY</code> 直接进入（进入后会自动从地址栏移除）。</p>
+    <p class="gate-hint" id="gateHint">
+      也可以用 <code>?apikey=你的KEY</code> 直接进入（进入后会自动从地址栏移除）。<br>
+      Key 只保存在你的浏览器里，填写后即可进入；是否有效会在用到站点接口时才提示。
+    </p>
   </div>
 </div>
 
@@ -98,6 +101,7 @@
       </div>
     </div>
     <p class="hint">公开接口（详情、标签）不带 Key；只有收藏列表与下载才使用 Key。</p>
+    <p class="hint setup-hint" id="setupHint" hidden></p>
 
     <div class="progress" id="progressPanel" hidden>
       <div class="progress-track"><div class="progress-bar" id="progressBar"></div></div>

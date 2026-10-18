@@ -328,3 +328,9 @@ img.thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading-text { color: var(--text); }
+
+/* ================= 首次部署引导 ================= */
+.setup-hint {
+  border: 1px solid #f0cf9a; background: #fff9ee; color: #8a5a00;
+  padding: 10px 14px; border-radius: 8px; font-size: 14px;
+}
