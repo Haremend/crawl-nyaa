@@ -16,10 +16,16 @@ CACHE_DIR = DATA_DIR / "cache"
 THUMB_CACHE_DIR = CACHE_DIR / "thumbs"
 # 封面保存目录（项目根目录 cover/），文件名 <gallery_id>.<ext>
 COVER_DIR = Path(os.environ.get("CLAW_COVER_DIR", BASE_DIR / "cover"))
+# 下载文件保存目录（项目根目录 downloads/）
+DOWNLOADS_DIR = Path(os.environ.get("CLAW_DOWNLOADS_DIR", BASE_DIR / "download"))
+# 批量下载时每个文件之间的间隔（秒）
+DOWNLOAD_DELAY = float(os.environ.get("CLAW_DOWNLOAD_DELAY", "1.0"))
 WEB_DIR = BASE_DIR / "web"
 SAMPLES_DIR = BASE_DIR / "samples"
 
 DEFAULT_URL = os.environ.get("CLAW_DEFAULT_URL", "")
+# 上游 API 站点地址：留空则从最近一次抓取的列表页 URL 推导
+API_ORIGIN = os.environ.get("CLAW_API_ORIGIN", "").strip()
 
 # 固定使用本地 10808 端口的 HTTP 代理；设置 CLAW_PROXY="" 可禁用代理。
 DEFAULT_PROXY = "http://127.0.0.1:10808"

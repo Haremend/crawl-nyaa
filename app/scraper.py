@@ -95,8 +95,16 @@ class Fetcher:
             return f"{message}，请确认本地代理 {self.proxy} 正在运行"
         return message
 
-    def fetch_raw(self, url: str, *, referer: str | None = None) -> tuple[bytes, str, str]:
-        request = urllib.request.Request(url, headers=self._headers(referer))
+    def request(self, url: str, *, method: str = "GET", headers: dict | None = None,
+                data: bytes | None = None, referer: str | None = None) -> tuple[bytes, str]:
+        """通用请求（可自定义方法/头部/请求体），复用同一套代理与重试逻辑。"""
+        merged = self._headers(referer)
+        merged.update(headers or {})
+        req = urllib.request.Request(url, data=data, headers=merged, method=method)
+        body, content_type, _charset = self._open_with_retry(req, url)
+        return body, content_type
+
+    def _open_with_retry(self, request: urllib.request.Request, url: str) -> tuple[bytes, str, str]:
         last_error: Exception | None = None
         for attempt in range(1, self.retries + 1):
             wait = 1.5 * attempt + random.uniform(0, 0.4)
@@ -119,6 +127,11 @@ class Fetcher:
                     raise FetchError(self._hint(f"网络错误：{reason}（{url}）")) from exc
             time.sleep(wait)
         raise FetchError(self._hint(f"请求失败：{last_error}（{url}）"))
+
+    def fetch_raw(self, url: str, *, referer: str | None = None) -> tuple[bytes, str, str]:
+        """GET 请求，返回 (响应体, content_type, charset)。"""
+        request = urllib.request.Request(url, headers=self._headers(referer))
+        return self._open_with_retry(request, url)
 
     def fetch_text(self, url: str, *, referer: str | None = None) -> str:
         body, _content_type, charset = self.fetch_raw(url, referer=referer)

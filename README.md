@@ -17,7 +17,16 @@
   - 同语言内：**页数多**优先 → **新上传**优先
 - **优先级排序**（同语言作品间）：列表按「优先级」排序时，同语言作品按**新作排前面**（不比页数）；排序选「优先级」即得到这份清单
 - **语言过滤**：按卡片语言标记多选筛选，语言 chips 显示每种语言去重后的作品数
-- **收藏**：卡片左上角 ♡ 点击即收藏 —— 只收藏**按优先级排序第一的那个推荐版本**（不会把其它语言版本一起标记）；支持「只看收藏」过滤，变体列表里会标出已收藏的版本
+- **批次号**：每次抓取生成一个批次号（`scrape_runs` 主键），作品上记录所属批次；页面顶部有**批次下拉搜索框**，
+  可按批次号或来源 URL 过滤，并显示「本批次是抓取哪个 URL 得到的」
+- **重复数据不覆盖原始记录**：不同批次抓到**完全相同**的数据时，保留最早那次的记录与批次号，
+  只刷新 `last_seen`；只有数据确实变化（标题/标签/页数等）才更新，并记录最新批次号
+- **API Key 门禁**：未填 Key 不展示内容；支持输入框或 `?apikey=xxx` 直达；Key 只存在**浏览器 cookie**，每次请求通过 `X-API-Key` 头带给后端；后端不保存 Key，且**只有需要认证的上游接口才带 Key**
+- **待下载 / 已下载**：卡片按钮「☆ 待下载」是**本地队列标记**（与站点账号的真实收藏完全分开）；下载完成后标记「已下载」，卡片**左上角**显示状态角标
+- **立即下载**：卡片上的按钮调用下载接口取回地址，交给**浏览器用你自己的网络下载**
+- **一键下载**：顶部按钮循环下载所有「待下载」作品，保存到项目 `download/` 目录并自动标记已下载
+- **保存全部**：顶部按钮把**当前批次的全部作品**保存到 `download/batch_<批次号>/`，同时写入 `manifest.json` 与 `works.csv` 清单（含批次来源 URL、抓取时间与作品元数据）
+- **我的收藏 tab**：用你的 API Key 读取站点账号的收藏列表，卡片与排序规则和作品库一致
 - 搜索、多字段排序（**优先级** / 最新 / 最旧 / 标题 / 作品原名称 / 版本数 / 收藏数 / 页数）、**无码过滤**、分页、CSV 导出（按当前筛选）、一键清空本地数据
 - **封面下载**：封面保存到项目 `cover/` 目录（文件名 `<gallery_id>.<ext>`），前端优先加载本地文件
 - **按作品原名称排序**：以详情 API 的日文原始标题排序，体现作品真实名称顺序
@@ -74,15 +83,23 @@ claw-gallery/
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/meta` | 代理、数据库路径、库统计、上次抓取记录 |
-| GET | `/api/works` | 列表查询，参数：`q`、`lang`（可重复）、`dedupe=0/1`、`uncensored=1`、`favorite=1`、`sort`（`priority`/`recent`/`oldest`/`title`/`original`/`variants`/`favorites`/`pages`）、`page`、`per_page` |
+| GET | `/api/meta` | 代理、数据库路径、库统计、批次列表、上次抓取记录 |
+| GET | `/api/batches` | 批次列表（批次号 / 来源 URL / 时间 / 本批作品数） |
+| GET | `/api/works` | 列表查询，参数：`q`、`lang`（可重复）、`dedupe=0/1`、`uncensored=1`、`want=1`、`downloaded=1`、`site_favorites=1`、`batch=<批次号>`、`sort`（`priority`/`recent`/`oldest`/`title`/`original`/`variants`/`favorites`/`pages`）、`page`、`per_page` |
 | POST | `/api/scrape` | 启动抓取，JSON：`{"url": "...", "max_pages": 0, "delay": 1.2, "enrich": true}`（`enrich` 控制详情补全） |
 | GET | `/api/scrape/status` | 抓取进度快照（含日志） |
 | POST | `/api/scrape/cancel` | 取消当前抓取（已抓数据保留） |
 | GET | `/api/thumb?u=<url>` | 代理缩略图（只接受 http/https 地址，磁盘缓存） |
 | GET | `/covers/<id>.<ext>` | 本地已下载封面（文件名白名单校验，防路径穿越） |
 | GET | `/api/export.csv` | 按当前筛选导出 CSV（UTF-8 BOM，Excel 可直接打开） |
-| POST | `/api/favorite` | 收藏/取消收藏，JSON：`{"ids": [123, 456], "favorite": true}` |
+| POST | `/api/want-download` | 标记/取消「待下载」，JSON：`{"ids": [123], "want": true}` |
+| POST | `/api/downloaded` | 标记/取消「已下载」，JSON：`{"ids": [123], "downloaded": true}` |
+| POST | `/api/download-url` | 取单个作品的下载地址（需 Key），返回给浏览器自行下载 |
+| POST | `/api/download/start` | 一键下载所有「待下载」作品（需 Key，保存到 `download/`） |
+| POST | `/api/batch/save` | 保存全部：把当前批次作品存到 `download/batch_<id>/` 并写清单（需 Key） |
+| GET | `/api/download/status` | 批量下载进度 |
+| POST | `/api/download/cancel` | 停止批量下载 |
+| GET | `/api/site-favorites` | 站点账号收藏列表（需 Key），同步进本地库后按默认规则排序 |
 | POST | `/api/reset` | 清空作品与抓取记录 |
 
 ## 数据库结构
@@ -184,6 +201,9 @@ JP 910001: [サンプルサークル (よろず)] サンプル合同「サンプ
 | `CLAW_COVERS` | `1` | 是否默认下载封面（`0` 关闭） |
 | `CLAW_COVER_DELAY` | `0.25` | 封面下载间隔（秒） |
 | `CLAW_COVER_DIR` | `cover/` | 封面输出目录 |
+| `CLAW_DOWNLOADS_DIR` | `download/` | 一键下载的输出目录 |
+| `CLAW_DOWNLOAD_DELAY` | `1.0` | 批量下载时每个文件之间的间隔（秒） |
+| `CLAW_API_ORIGIN` | 空 | 上游 API 站点地址；留空则自动取最近一次抓取的列表页地址 |
 | `CLAW_MAX_PAGES` | `200` | 单次抓取页数上限（前端可再限制） |
 | `CLAW_HOST` / `CLAW_PORT` | `127.0.0.1` / `8787` | 本地服务监听地址 |
 | `CLAW_DB` / `CLAW_DATA_DIR` | `data/gallery.sqlite3` | 数据库路径 / 数据目录 |

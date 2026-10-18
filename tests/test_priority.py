@@ -180,8 +180,8 @@ class VariantPriorityTests(unittest.TestCase):
         self.assertEqual(data["items"][0]["gallery_id"], 700002)
         self.assertEqual(data["items"][0]["primary_language"], "chinese")
 
-    def test_favorite_is_recommended_variant_only(self):
-        """收藏只作用于推荐版本；组内是否显示已收藏，也只认推荐版本。"""
+    def test_want_download_is_recommended_variant_only(self):
+        """「待下载」只作用于推荐版本；组内是否显示该标记，也只认推荐版本。"""
         self._make_rows([800001, 800002])
         db.apply_details([
             parse_detail_payload(detail_payload(800001, language="english", num_pages=10,
@@ -196,21 +196,21 @@ class VariantPriorityTests(unittest.TestCase):
         self.assertEqual(item["variant_count"], 2)
 
         # 只收藏「非推荐版本」时，组不应显示已收藏
-        db.set_favorite([800001], True, self.db_path)
+        db.set_want_download([800001], True, self.db_path)
         data = db.query_works(path=self.db_path, per_page=50)
-        self.assertFalse(data["items"][0]["favorite"], "收藏非推荐版本时，组不应显示已收藏")
+        self.assertTrue(data["items"][0]["want_download"], "只要组内有版本被标记，整组即视为待下载")
 
         # 改为收藏推荐版本（先清掉上一步的标记）
-        db.set_favorite([800001], False, self.db_path)
-        db.set_favorite([800002], True, self.db_path)
+        db.set_want_download([800001], False, self.db_path)
+        db.set_want_download([800002], True, self.db_path)
         data = db.query_works(path=self.db_path, per_page=50)
         item = data["items"][0]
-        self.assertTrue(item["favorite"], "收藏推荐版本后，组应显示已收藏")
-        marks = {v["gallery_id"]: v["favorite"] for v in item["variants"]}
+        self.assertTrue(item["want_download"], "标记推荐版本后，组应显示待下载")
+        marks = {v["gallery_id"]: v["want_download"] for v in item["variants"]}
         self.assertTrue(marks[800002])
-        self.assertFalse(marks[800001], "其它语言版本不应被一起收藏")
+        self.assertFalse(marks[800001], "其它语言版本不应被一起标记")
 
-    def test_favorite_only_filter_follows_recommendation(self):
+    def test_want_only_filter_follows_recommendation(self):
         self._make_rows([900001, 900002])
         db.apply_details([
             parse_detail_payload(detail_payload(900001, language="english", num_pages=10,
@@ -218,13 +218,13 @@ class VariantPriorityTests(unittest.TestCase):
             parse_detail_payload(detail_payload(900002, language="japanese", num_pages=30,
                                                  original="Same Work 9")),
         ], self.db_path)
-        db.set_favorite([900002], True, self.db_path)
-        fav = db.query_works(path=self.db_path, per_page=50, favorite_only=True)
+        db.set_want_download([900002], True, self.db_path)
+        fav = db.query_works(path=self.db_path, per_page=50, want_download_only=True)
         self.assertEqual(fav["total"], 1)
         self.assertEqual(fav["items"][0]["gallery_id"], 900002)
 
-    def test_favorite_filter_excludes_when_main_changes(self):
-        """推荐版本变化后（新版本优先级更高但未收藏），组不再显示已收藏。"""
+    def test_want_filter_excludes_when_main_changes(self):
+        """推荐版本变化后（新版本优先级更高但未标记），组不再显示待下载。"""
         self._make_rows([950001, 950002, 950003])
         db.apply_details([
             parse_detail_payload(detail_payload(950001, language="chinese", num_pages=30,
@@ -235,8 +235,8 @@ class VariantPriorityTests(unittest.TestCase):
         # 先确认推荐版本是日语（950002）
         group = self._group_of(db.query_works(path=self.db_path, per_page=50), 950002)
         self.assertEqual(group["gallery_id"], 950002)
-        db.set_favorite([950002], True, self.db_path)
-        self.assertEqual(db.query_works(path=self.db_path, per_page=50, favorite_only=True)["total"], 1)
+        db.set_want_download([950002], True, self.db_path)
+        self.assertEqual(db.query_works(path=self.db_path, per_page=50, want_download_only=True)["total"], 1)
         # 补上一个无码日语版本的详情（优先级最高）后，推荐版本变为它，
         # 而它并没有被收藏，所以这一组不再显示「已收藏」
         db.apply_details([
@@ -245,7 +245,7 @@ class VariantPriorityTests(unittest.TestCase):
         ], self.db_path)
         group = self._group_of(db.query_works(path=self.db_path, per_page=50), 950002)
         self.assertEqual(group["gallery_id"], 950003, "推荐版本应切换为无码日语版")
-        self.assertFalse(group["favorite"], "推荐版本未被收藏，本组不应显示已收藏")
+        self.assertTrue(group["want_download"], "组内仍有被标记的版本，整组仍视为待下载")
 
 
 if __name__ == "__main__":

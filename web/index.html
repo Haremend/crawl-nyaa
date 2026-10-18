@@ -3,17 +3,35 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>claw-gallery · 作品列表整理</title>
+  <title>claw-gallery · 作品整理</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+
+<!-- ============ API Key 门禁 ============ -->
+<div class="gate" id="gate" hidden>
+  <div class="gate-card">
+    <h2>需要 API Key</h2>
+    <p class="gate-desc">本工具通过 API Key 访问站点接口。Key 仅保存在你自己的浏览器 cookie 中，不会写入服务端。</p>
+    <label class="field">
+      <span>API Key</span>
+      <input id="gateInput" type="password" spellcheck="false" placeholder="nhk_..." autocomplete="off">
+    </label>
+    <div class="gate-actions">
+      <button id="gateBtn" class="btn primary">确定进入</button>
+      <button id="gateClear" class="btn ghost">清除已保存的 Key</button>
+    </div>
+    <p class="gate-hint" id="gateHint">也可以用 <code>?apikey=你的KEY</code> 直接进入（进入后会自动从地址栏移除）。</p>
+  </div>
+</div>
+
 <header class="topbar">
   <div class="brand">
-    <div class="logo">🦀</div>
+    <div class="logo">🦞</div>
     <div>
       <h1>claw-gallery</h1>
-      <p class="subtitle">画廊列表抓取 · 同作品去重 · 语言过滤 · 本地 SQLite</p>
+      <p class="subtitle">列表抓取 · 同作品去重 · 语言/无码筛选 · 待下载与一键下载</p>
     </div>
   </div>
   <div class="meta-chips">
@@ -24,13 +42,37 @@
 </header>
 
 <main>
-  <section class="panel">
+  <!-- ============ 批次号（顶部下拉搜索） ============ -->
+  <section class="panel batch-panel">
+    <div class="batch-row">
+      <label class="field batch-search">
+        <span>批次号</span>
+        <input id="batchSearch" type="search" placeholder="输入批次号或来源 URL 过滤…" autocomplete="off">
+      </label>
+      <label class="field batch-select">
+        <span>选择批次</span>
+        <select id="batchSelect"><option value="">全部批次</option></select>
+      </label>
+      <div class="actions">
+        <button id="saveBatchBtn" class="btn primary">保存全部（当前批次）</button>
+      </div>
+      <div class="batch-info" id="batchInfo">未选择批次：显示全部作品</div>
+    </div>
+  </section>
+
+  <!-- ============ 标签页 ============ -->
+  <nav class="tabs">
+    <button class="tab active" data-tab="library">作品库</button>
+    <button class="tab" data-tab="favorites">我的收藏（站点）</button>
+  </nav>
+
+  <!-- ============ 作品库：抓取 + 一键下载 ============ -->
+  <section class="panel" id="libraryPanel">
     <div class="panel-title">抓取</div>
     <div class="scrape-form">
       <label class="field grow">
         <span>列表页 URL</span>
-        <input id="urlInput" type="text" spellcheck="false"
-               placeholder="https://example.net/group/samplecircle/">
+        <input id="urlInput" type="text" spellcheck="false" placeholder="https://…/group/xxx/">
       </label>
       <label class="field">
         <span>最多页数（0 = 全部）</span>
@@ -42,18 +84,18 @@
       </label>
       <label class="check">
         <input id="enrichCheck" type="checkbox" checked>
-        <span>详情补全<br><small>原始标题精确去重 + 完整标签（较慢）</small></span>
+        <span>详情补全<br><small>原始标题精确去重 + 完整标签</small></span>
       </label>
       <label class="check">
         <input id="coverCheck" type="checkbox" checked>
-        <span>保存封面<br><small>下载到项目 cover/ 目录</small></span>
+        <span>保存封面<br><small>下载到 cover/</small></span>
       </label>
       <div class="actions">
         <button id="startBtn" class="btn primary">开始抓取</button>
         <button id="cancelBtn" class="btn ghost" disabled>取消</button>
       </div>
     </div>
-    <p class="hint">请求固定走本地 HTTP 代理 <code id="proxyHint">http://127.0.0.1:10808</code>；同一时间只允许一个抓取任务，默认每页之间限速。封面保存在 <code id="coverHint">cover/</code> 目录。</p>
+    <p class="hint">公开接口（详情、标签）不带 Key；只有收藏列表与下载才使用 Key。</p>
 
     <div class="progress" id="progressPanel" hidden>
       <div class="progress-track"><div class="progress-bar" id="progressBar"></div></div>
@@ -63,7 +105,49 @@
   </section>
 
   <section class="panel">
-    <div class="panel-title">筛选 / 去重</div>
+    <div class="panel-title">一键下载</div>
+    <div class="download-form">
+      <label class="field">
+        <span>下载格式</span>
+        <select id="formatSelect">
+          <option value="zip" selected>zip</option>
+          <option value="cbz">cbz</option>
+          <option value="torrent">torrent（限流严格）</option>
+        </select>
+      </label>
+      <div class="actions">
+        <button id="downloadAllBtn" class="btn primary">下载全部「待下载」</button>
+        <button id="downloadCancelBtn" class="btn ghost" disabled>停止</button>
+      </div>
+      <div class="dl-summary" id="dlSummary"></div>
+    </div>
+    <p class="hint">逐个调用下载接口，保存到项目 <code id="dlDirHint">download/</code>，完成后自动标记「已下载」。</p>
+    <div class="progress" id="dlProgressPanel" hidden>
+      <div class="progress-track"><div class="progress-bar" id="dlProgressBar"></div></div>
+      <div class="progress-text" id="dlProgressText"></div>
+      <pre class="log" id="dlLogBox"></pre>
+    </div>
+  </section>
+
+  <!-- ============ 我的收藏（站点） ============ -->
+  <section class="panel" id="favoritesPanel" hidden>
+    <div class="panel-title">站点账号收藏</div>
+    <div class="filter-row">
+      <label class="field grow">
+        <span>在收藏里搜索</span>
+        <input id="favSearchInput" type="search" placeholder="输入关键词…">
+      </label>
+      <div class="actions">
+        <button id="favReloadBtn" class="btn">刷新收藏</button>
+      </div>
+      <div class="dl-summary" id="favSummary"></div>
+    </div>
+    <p class="hint">由站点 API 提供，卡片风格与排序规则和作品库一致；「待下载」是本地标记，与站点账号的收藏相互独立。</p>
+  </section>
+
+  <!-- ============ 筛选 ============ -->
+  <section class="panel">
+    <div class="panel-title">筛选 / 标记</div>
     <div class="filter-row">
       <label class="field grow">
         <span>搜索（标题 / 标签 / 社团 / 原作等）</span>
@@ -74,12 +158,16 @@
         <span>同作品去重<br><small>合并同一作品的不同语言版本</small></span>
       </label>
       <label class="check">
-        <input id="uncensoredCheck" type="checkbox">
-        <span>只看无码<br><small>uncensored</small></span>
+        <input id="wantCheck" type="checkbox">
+        <span>只看待下载<br><small>本地标记</small></span>
       </label>
       <label class="check">
-        <input id="favoriteCheck" type="checkbox">
-        <span>只看收藏<br><small>♥</small></span>
+        <input id="downloadedCheck" type="checkbox">
+        <span>只看已下载<br><small>本地标记</small></span>
+      </label>
+      <label class="check">
+        <input id="uncensoredCheck" type="checkbox">
+        <span>只看无码<br><small>uncensored</small></span>
       </label>
       <label class="field">
         <span>排序</span>
@@ -111,14 +199,11 @@
   </section>
 
   <section class="stats" id="statsRow"></section>
-
   <section class="grid" id="grid"></section>
-
   <nav class="pager" id="pager"></nav>
 </main>
 
 <div id="toast" class="toast" hidden></div>
-
 <script src="/static/app.js" defer></script>
 </body>
 </html>

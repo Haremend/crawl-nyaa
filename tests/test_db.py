@@ -36,7 +36,9 @@ class DbTests(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_first_insert(self):
-        self.assertEqual(self.first, {"seen": 4, "new": 4, "dup": 0})
+        self.assertEqual(self.first["seen"], 4)
+        self.assertEqual(self.first["new"], 4)
+        self.assertEqual(self.first["dup"], 0)
 
     def test_reinsert_counts_as_duplicate(self):
         again = db.upsert_items(self.items, source_url=BASE_URL, path=self.db_path)

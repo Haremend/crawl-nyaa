@@ -272,11 +272,15 @@ class ScrapeService:
                 pages_done = page.page_no
                 if page.last_page:
                     pages_total = min(page.last_page, max_pages) if max_pages else page.last_page
-                result = db.upsert_items(page.items, source_url=page.url, path=self.db_path)
+                result = db.upsert_items(page.items, source_url=page.url,
+                                         batch_id=run_id, path=self.db_path)
                 seen += result["seen"]
                 new += result["new"]
                 dup += result["dup"]
-                self._log(f"第 {page.page_no} 页入库：新增 {result['new']}，重复/更新 {result['dup']}")
+                self._log(
+                    f"第 {page.page_no} 页入库：新增 {result['new']}，"
+                    f"重复 {result['dup']}（其中数据未变化 {result.get('unchanged', 0)}，保留原始记录）"
+                )
                 self._progress(
                     pages_done=pages_done, pages_total=pages_total,
                     items_seen=seen, items_new=new, items_dup=dup,

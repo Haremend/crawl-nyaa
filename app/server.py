@@ -14,8 +14,16 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
 from . import config, covers as covers_mod, db
+from .downloader import DownloadService
 from .scraper import FetchError, Fetcher
+from .upstream import UpstreamClient, UpstreamError
 from .service import ScrapeError, ScrapeService
+
+
+def _download_filename(gallery_id: int, fmt: str) -> str:
+    """建议的下载文件名（前端 a[download] 用）。"""
+    ext = fmt if fmt in ("zip", "cbz", "torrent") else "zip"
+    return f"{int(gallery_id)}.{ext}"
 
 
 def thumb_proxy_path(url: str) -> str:
@@ -62,6 +70,7 @@ class ApiServer(ThreadingHTTPServer):
         self.web_dir = Path(web_dir) if web_dir else config.WEB_DIR
         self.cover_dir = Path(config.COVER_DIR)
         self.service = ScrapeService(self.db_path)
+        self.download_service = DownloadService(self.db_path)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -74,6 +83,17 @@ class Handler(BaseHTTPRequestHandler):
         if any(part in message for part in self.quiet_paths):
             return
         sys.stderr.write(f"[http] {self.address_string()} {message}\n")
+
+    def _api_key(self, query: dict | None = None) -> str:
+        """从请求头 X-API-Key 或查询参数 apikey 读取用户 Key（不落盘、不记日志）。"""
+        header = (self.headers.get("X-API-Key") or "").strip()
+        if header:
+            return header
+        if query:
+            values = query.get("apikey") or []
+            if values:
+                return str(values[0]).strip()
+        return ""
 
     # ---------- 响应工具 ----------
     def _send(self, body: bytes, content_type: str, status: int = 200, headers: dict | None = None) -> None:
@@ -134,6 +154,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._handle_meta()
             elif path == "/api/works":
                 self._handle_works(query)
+            elif path == "/api/batches":
+                self._json({"ok": True, "batches": db.list_batches(self.server.db_path)})
+            elif path == "/api/site-favorites":
+                self._handle_site_favorites(query)
+            elif path == "/api/download/status":
+                self._json({"ok": True, **self.server.download_service.snapshot()})
             elif path == "/api/scrape/status":
                 self._json({"ok": True, **self.server.service.snapshot()})
             elif path == "/api/thumb":
@@ -188,6 +214,10 @@ class Handler(BaseHTTPRequestHandler):
             "db_path": str(self.server.db_path),
             "data_dir": str(config.DATA_DIR),
             "cover_dir": str(config.COVER_DIR),
+            "download_dir": str(config.DOWNLOADS_DIR),
+            "site_origin": db.get_site_origin(self.server.db_path),
+            "batches": db.list_batches(self.server.db_path),
+            "download_status": self.server.download_service.snapshot(),
             "stats": db.stats(self.server.db_path),
             "limits": {
                 "max_pages": config.MAX_PAGES,
@@ -208,21 +238,86 @@ class Handler(BaseHTTPRequestHandler):
         if sort not in ("recent", "oldest", "title", "original", "variants", "favorites", "pages", "priority"):
             sort = "recent"
         uncensored = (query.get("uncensored", ["0"])[0] or "0").lower() not in ("0", "false", "no")
-        favorite_only = (query.get("favorite", ["0"])[0] or "0").lower() not in ("0", "false", "no")
+        want_only = (query.get("want", ["0"])[0] or "0").lower() not in ("0", "false", "no")
+        downloaded_only = (query.get("downloaded", ["0"])[0] or "0").lower() not in ("0", "false", "no")
+        site_only = (query.get("site_favorites", ["0"])[0] or "0").lower() not in ("0", "false", "no")
+        batch_id = _int_param(query, "batch", 0, 0, 10 ** 9) or None
         page = _int_param(query, "page", 1, 1, 100000)
         per_page = _int_param(query, "per_page", 24, 1, 200)
         data = db.query_works(
             q=q, languages=languages, dedupe_title=dedupe, sort=sort,
-            page=page, per_page=per_page, uncensored=uncensored, favorite_only=favorite_only, path=self.server.db_path,
+            page=page, per_page=per_page, uncensored=uncensored,
+            want_download_only=want_only, downloaded_only=downloaded_only,
+            site_favorites_only=site_only, batch_id=batch_id, path=self.server.db_path,
         )
         for item in data["items"]:
-            item["thumb"] = thumb_proxy_path(item.get("thumbnail") or "")
-            item["cover_url"] = local_cover_path(item.get("cover_file") or "")
-            for variant in item.get("variants", []):
-                variant["thumb"] = thumb_proxy_path(variant.get("thumbnail") or "")
-                variant["cover_url"] = local_cover_path(variant.get("cover_file") or "")
+            self._decorate(item)
         data["ok"] = True
         self._json(data)
+
+    def _decorate(self, item: dict) -> dict:
+        """给作品补上缩略图代理路径与本地封面路径。"""
+        item["thumb"] = thumb_proxy_path(item.get("thumbnail") or "")
+        item["cover_url"] = local_cover_path(item.get("cover_file") or "")
+        for variant in item.get("variants", []):
+            variant["thumb"] = thumb_proxy_path(variant.get("thumbnail") or "")
+            variant["cover_url"] = local_cover_path(variant.get("cover_file") or "")
+        return item
+
+    def _ordered_by_ids(self, ids: list[int]) -> list[dict]:
+        """按本地默认优先级规则，返回这些 id 对应的作品（含封面与标记）。"""
+        wanted = {int(i) for i in ids if i}
+        if not wanted:
+            return []
+        picked: list[dict] = []
+        seen: set[int] = set()
+        page = 1
+        while True:
+            data = db.query_works(page=page, per_page=200, sort="priority", path=self.server.db_path)
+            for item in data["items"]:
+                if wanted.intersection(item["ids"]) and item["gallery_id"] not in seen:
+                    seen.add(item["gallery_id"])
+                    picked.append(self._decorate(item))
+            if page >= data.get("pages", 1):
+                break
+            page += 1
+        return picked
+
+    def _handle_site_favorites(self, query: dict) -> None:
+        """站点账号收藏列表：用请求携带的 Key 拉取，并同步进本地库统一排序。"""
+        api_key = self._api_key(query)
+        if not api_key:
+            self._error("该接口需要 API Key", 401)
+            return
+        origin = db.get_site_origin(self.server.db_path)
+        if not origin:
+            self._error("未知站点地址：请先抓取一次列表页", 400)
+            return
+        page = _int_param(query, "page", 1, 1, 10000)
+        keyword = (query.get("q", [""])[0] or "").strip()
+        try:
+            payload = UpstreamClient(origin, api_key).list_favorites(page=page, query=keyword)
+        except UpstreamError as exc:
+            self._error(str(exc), exc.status or 502)
+            return
+
+        items = payload.get("items") or []
+        for item in items:
+            item["site_favorite"] = 1
+            item["from_scrape"] = 0
+            item["url"] = f"{origin}/g/{item['gallery_id']}/"
+        if items:
+            # 同步进本地库，这样「待下载/已下载」标记与排序都能复用同一套逻辑
+            db.upsert_items(items, source_url=f"{origin}/favorites", path=self.server.db_path)
+
+        self._json({
+            "ok": True,
+            "items": self._ordered_by_ids([item["gallery_id"] for item in items]),
+            "page": payload.get("page", page),
+            "num_pages": payload.get("num_pages", 1),
+            "per_page": payload.get("per_page", 25),
+            "total": payload.get("total", len(items)),
+        })
 
     def _handle_thumb(self, query: dict) -> None:
         raw = (query.get("u", [""])[0] or "").strip()
@@ -268,15 +363,20 @@ class Handler(BaseHTTPRequestHandler):
         languages = [value.strip().lower() for value in query.get("lang", []) if value.strip()]
         dedupe = (query.get("dedupe", ["1"])[0] or "1").lower() not in ("0", "false", "no")
         sort = (query.get("sort", ["recent"])[0] or "recent").lower()
-        if sort not in ("recent", "oldest", "title", "original", "variants", "favorites", "pages"):
+        if sort not in ("recent", "oldest", "title", "original", "variants", "favorites", "pages", "priority"):
             sort = "recent"
+        uncensored = (query.get("uncensored", ["0"])[0] or "0").lower() not in ("0", "false", "no")
+        want_only = (query.get("want", ["0"])[0] or "0").lower() not in ("0", "false", "no")
+        site_only = (query.get("site_favorites", ["0"])[0] or "0").lower() not in ("0", "false", "no")
 
         items: list[dict] = []
         page = 1
         while len(items) < config.EXPORT_MAX_ROWS:
             data = db.query_works(
                 q=q, languages=languages, dedupe_title=dedupe, sort=sort,
-                page=page, per_page=200, path=self.server.db_path,
+                page=page, per_page=200, uncensored=uncensored,
+                want_download_only=want_only, site_favorites_only=site_only,
+                path=self.server.db_path,
             )
             items.extend(data["items"])
             if page >= data["pages"]:
@@ -340,14 +440,109 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/scrape/cancel":
                 cancelled = self.server.service.cancel()
                 self._json({"ok": True, "cancelled": cancelled, **self.server.service.snapshot()})
-            elif path == "/api/favorite":
+            elif path == "/api/want-download":
                 payload = self._read_json()
                 if payload is None:
                     return
-                ids = payload.get("ids", [])
-                fav = bool(payload.get("favorite", False))
-                updated = db.set_favorite(ids, fav, self.server.db_path)
+                updated = db.set_want_download(payload.get("ids", []),
+                                               bool(payload.get("want", False)),
+                                               self.server.db_path)
                 self._json({"ok": True, "updated": updated})
+            elif path == "/api/downloaded":
+                payload = self._read_json()
+                if payload is None:
+                    return
+                updated = db.set_downloaded(payload.get("ids", []),
+                                            bool(payload.get("downloaded", False)),
+                                            self.server.db_path)
+                self._json({"ok": True, "updated": updated})
+            elif path == "/api/download-url":
+                # 只取下载地址返回给浏览器，由用户自己的网络下载（不在服务器落盘）
+                payload = self._read_json()
+                if payload is None:
+                    return
+                api_key = self._api_key(parse_qs(urlsplit(self.path).query))
+                if not api_key:
+                    self._error("该接口需要 API Key", 401)
+                    return
+                origin = db.get_site_origin(self.server.db_path)
+                if not origin:
+                    self._error("未知站点地址：请先抓取一次列表页", 400)
+                    return
+                try:
+                    gallery_id = int(payload.get("gallery_id") or 0)
+                except (TypeError, ValueError):
+                    gallery_id = 0
+                if gallery_id <= 0:
+                    self._error("缺少有效的 gallery_id", 400)
+                    return
+                fmt = str(payload.get("format") or "zip")
+                try:
+                    info = UpstreamClient(origin, api_key).get_download_url(gallery_id, fmt)
+                except UpstreamError as exc:
+                    self._error(str(exc), exc.status or 502)
+                    return
+                if not info.get("url"):
+                    self._error("上游未返回下载地址", 502)
+                    return
+                self._json({"ok": True, "url": info.get("url"),
+                            "expires_at": info.get("expires_at"), "format": fmt,
+                            "filename": _download_filename(gallery_id, fmt)})
+            elif path == "/api/batch/save":
+                # 保存当前批次的全部数据到 download/batch_<id>/
+                payload = self._read_json()
+                if payload is None:
+                    return
+                api_key = self._api_key(parse_qs(urlsplit(self.path).query))
+                if not api_key:
+                    self._error("缺少 API Key", 401)
+                    return
+                origin = db.get_site_origin(self.server.db_path)
+                if not origin:
+                    self._error("未知站点地址：请先抓取一次列表页", 400)
+                    return
+                try:
+                    UpstreamClient(origin, api_key).get_user()
+                except UpstreamError as exc:
+                    self._error(f"API Key 校验失败：{exc}", exc.status or 401)
+                    return
+                try:
+                    state = self.server.download_service.start(
+                        api_key, str(payload.get("format") or "zip"),
+                        mode="batch", batch_id=int(payload.get("batch_id") or 0))
+                except UpstreamError as exc:
+                    self._error(str(exc), exc.status or 400)
+                    return
+                self._json({"ok": True, "download": state})
+            elif path == "/api/download/start":
+                payload = self._read_json()
+                if payload is None:
+                    return
+                api_key = self._api_key(parse_qs(urlsplit(self.path).query))
+                if not api_key:
+                    self._error("缺少 API Key", 401)
+                    return
+                origin = db.get_site_origin(self.server.db_path)
+                if not origin:
+                    self._error("未知站点地址：请先抓取一次列表页", 400)
+                    return
+                # 先校验 Key，避免带着无效 Key 启动注定失败的任务
+                try:
+                    UpstreamClient(origin, api_key).get_user()
+                except UpstreamError as exc:
+                    self._error(f"API Key 校验失败：{exc}", exc.status or 401)
+                    return
+                try:
+                    state = self.server.download_service.start(
+                        api_key, str(payload.get("format") or "zip"))
+                except UpstreamError as exc:
+                    self._error(str(exc), exc.status or 400)
+                    return
+                self._json({"ok": True, "download": state})
+            elif path == "/api/download/cancel":
+                self._json({"ok": True,
+                            "cancelled": self.server.download_service.cancel(),
+                            **self.server.download_service.snapshot()})
             elif path == "/api/reset":
                 removed = db.reset_all(self.server.db_path)
                 self._json({"ok": True, "removed": removed})
