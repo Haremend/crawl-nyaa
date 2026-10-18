@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 本地数据与抓取产物（不要提交）
+data/
+cover/
+
+# 测试临时目录
+.test-tmp/
+
+# 虚拟环境与编辑器
+.venv/
+venv/
+.idea/
+.vscode/

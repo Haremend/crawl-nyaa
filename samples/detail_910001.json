@@ -1,0 +1,24 @@
+{
+  "id": 910001,
+  "media_id": "9900003",
+  "title": {
+    "english": "[SampleCircle (Various)] Sample Anthology \"Sample\" Vol.3 (Sample Series A) [Digital]",
+    "japanese": "[サンプルサークル (よろず)] サンプル合同「サンプル」Vol.3 (サンプルシリーズA) [DL版]",
+    "pretty": "Sample Anthology \"Sample\" Vol.3"
+  },
+  "thumbnail": {"path": "galleries/9900003/thumb.webp", "width": 250, "height": 353},
+  "scanlator": "",
+  "num_pages": 32,
+  "num_favorites": 967,
+  "upload_date": 1748690723,
+  "tags": [
+    {"id": 1, "type": "category", "name": "doujinshi", "slug": "doujinshi"},
+    {"id": 2, "type": "language", "name": "japanese", "slug": "japanese"},
+    {"id": 3, "type": "tag", "name": "big breasts", "slug": "big-breasts"},
+    {"id": 4, "type": "tag", "name": "anthologyshi", "slug": "anthologyshi"},
+    {"id": 5, "type": "parody", "name": "zenless zone zero", "slug": "zenless-zone-zero"},
+    {"id": 6, "type": "artist", "name": "sampleartist1", "slug": "sampleartist1"},
+    {"id": 7, "type": "artist", "name": "sampleartist2", "slug": "sampleartist2"},
+    {"id": 8, "type": "group", "name": "samplecircle", "slug": "samplecircle"}
+  ]
+}

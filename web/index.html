@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>claw-gallery · 作品列表整理</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">🦀</div>
+    <div>
+      <h1>claw-gallery</h1>
+      <p class="subtitle">画廊列表抓取 · 同作品去重 · 语言过滤 · 本地 SQLite</p>
+    </div>
+  </div>
+  <div class="meta-chips">
+    <span class="meta-chip" id="proxyChip">代理</span>
+    <span class="meta-chip" id="dbChip" title="">SQLite</span>
+    <span class="meta-chip" id="lastRunChip">暂无抓取记录</span>
+  </div>
+</header>
+
+<main>
+  <section class="panel">
+    <div class="panel-title">抓取</div>
+    <div class="scrape-form">
+      <label class="field grow">
+        <span>列表页 URL</span>
+        <input id="urlInput" type="text" spellcheck="false"
+               placeholder="https://example.net/group/samplecircle/">
+      </label>
+      <label class="field">
+        <span>最多页数（0 = 全部）</span>
+        <input id="maxPages" type="number" min="0" max="200" step="1" value="0">
+      </label>
+      <label class="field">
+        <span>页面间隔（秒）</span>
+        <input id="delay" type="number" min="0.2" max="10" step="0.1" value="1.2">
+      </label>
+      <label class="check">
+        <input id="enrichCheck" type="checkbox" checked>
+        <span>详情补全<br><small>原始标题精确去重 + 完整标签（较慢）</small></span>
+      </label>
+      <label class="check">
+        <input id="coverCheck" type="checkbox" checked>
+        <span>保存封面<br><small>下载到项目 cover/ 目录</small></span>
+      </label>
+      <div class="actions">
+        <button id="startBtn" class="btn primary">开始抓取</button>
+        <button id="cancelBtn" class="btn ghost" disabled>取消</button>
+      </div>
+    </div>
+    <p class="hint">请求固定走本地 HTTP 代理 <code id="proxyHint">http://127.0.0.1:10808</code>；同一时间只允许一个抓取任务，默认每页之间限速。封面保存在 <code id="coverHint">cover/</code> 目录。</p>
+
+    <div class="progress" id="progressPanel" hidden>
+      <div class="progress-track"><div class="progress-bar" id="progressBar"></div></div>
+      <div class="progress-text" id="progressText"></div>
+      <pre class="log" id="logBox"></pre>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-title">筛选 / 去重</div>
+    <div class="filter-row">
+      <label class="field grow">
+        <span>搜索（标题 / 标签 / 社团 / 原作等）</span>
+        <input id="searchInput" type="search" placeholder="输入关键词后自动筛选…">
+      </label>
+      <label class="check">
+        <input id="dedupeCheck" type="checkbox" checked>
+        <span>同作品去重<br><small>合并同一作品的不同语言版本</small></span>
+      </label>
+      <label class="check">
+        <input id="uncensoredCheck" type="checkbox">
+        <span>只看无码<br><small>uncensored</small></span>
+      </label>
+      <label class="check">
+        <input id="favoriteCheck" type="checkbox">
+        <span>只看收藏<br><small>♥</small></span>
+      </label>
+      <label class="field">
+        <span>排序</span>
+        <select id="sortSelect">
+          <option value="priority" selected>优先级（无码>日>中>英）</option>
+          <option value="recent">最新入库</option>
+          <option value="oldest">最旧入库</option>
+          <option value="title">标题</option>
+          <option value="original">作品原名称</option>
+          <option value="variants">版本数</option>
+          <option value="favorites">收藏数</option>
+          <option value="pages">页数</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>每页数量</span>
+        <select id="perPageSelect">
+          <option value="24">24</option>
+          <option value="48" selected>48</option>
+          <option value="96">96</option>
+        </select>
+      </label>
+      <div class="actions">
+        <button id="exportBtn" class="btn">导出 CSV</button>
+        <button id="resetBtn" class="btn danger">清空数据</button>
+      </div>
+    </div>
+    <div class="lang-bar" id="langBar"></div>
+  </section>
+
+  <section class="stats" id="statsRow"></section>
+
+  <section class="grid" id="grid"></section>
+
+  <nav class="pager" id="pager"></nav>
+</main>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/static/app.js" defer></script>
+</body>
+</html>

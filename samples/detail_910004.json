@@ -1,0 +1,21 @@
+{
+  "id": 910004,
+  "media_id": "9900001",
+  "title": {
+    "english": "[SampleCircle (Various)] Sample Anthology \"Sample\" Vol.3 (Sample Series A) [English] [TLsGroup] [Digital]",
+    "japanese": "[サンプルサークル (よろず)] サンプル合同「サンプル」Vol.3 (サンプルシリーズA) [英訳] [DL版]",
+    "pretty": "Sample Anthology \"Sample\" Vol.3"
+  },
+  "thumbnail": {"path": "galleries/9900001/thumb.webp", "width": 250, "height": 353},
+  "scanlator": "SDTLs",
+  "num_pages": 32,
+  "num_favorites": 1203,
+  "upload_date": 1750061000,
+  "tags": [
+    {"id": 1, "type": "category", "name": "doujinshi", "slug": "doujinshi"},
+    {"id": 2, "type": "language", "name": "translated", "slug": "translated"},
+    {"id": 3, "type": "language", "name": "english", "slug": "english"},
+    {"id": 4, "type": "tag", "name": "big breasts", "slug": "big-breasts"},
+    {"id": 5, "type": "group", "name": "samplecircle", "slug": "samplecircle"}
+  ]
+}
