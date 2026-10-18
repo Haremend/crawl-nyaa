@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config, db
+from .filenames import download_filename
 from .scraper import FetchError, Fetcher
 from .upstream import UpstreamClient, UpstreamError
 
@@ -40,8 +41,13 @@ class DownloadService:
 
     # ---------- 对外接口 ----------
     def start(self, api_key: str, fmt: str = "zip", *,
-              mode: str = "want", batch_id: int | None = None) -> dict:
-        """mode="want"：下载所有「待下载」；mode="batch"：保存指定批次的全部作品。"""
+              mode: str = "want", batch_id: int | None = None,
+              redownload: bool = False) -> dict:
+        """mode="want"：下载所有「待下载」；mode="batch"：保存指定批次的全部作品。
+
+        redownload=False：先按数据库「已下载」标记跳过；
+        redownload=True：忽略该标记重新下载，但仍按文件名跳过磁盘上已存在的文件。
+        """
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 raise UpstreamError("已有下载任务正在进行", 409)
@@ -56,13 +62,15 @@ class DownloadService:
                 batch = int(batch_id or 0)
                 if batch <= 0:
                     raise UpstreamError("请先选择一个批次", 400)
-                targets = db.list_batch_targets(batch, self.db_path)
+                targets = db.list_batch_targets(batch, self.db_path,
+                                                 skip_downloaded=not redownload)
                 if not targets:
                     raise UpstreamError(f"批次 #{batch} 没有可保存的作品", 400)
                 subdir = f"batch_{batch}"
             else:
                 batch = None
-                targets = db.list_want_download_targets(self.db_path)
+                targets = db.list_want_download_targets(self.db_path,
+                                                        skip_downloaded=not redownload)
                 if not targets:
                     raise UpstreamError("没有标记为「待下载」的作品", 400)
                 subdir = ""
@@ -75,6 +83,7 @@ class DownloadService:
                 "running": True,
                 "format": fmt,
                 "mode": mode,
+                "redownload": bool(redownload),
                 "batch_id": batch,
                 "out_dir": str(Path(config.DOWNLOADS_DIR) / subdir) if subdir else str(config.DOWNLOADS_DIR),
                 "total": len(targets),
@@ -86,6 +95,8 @@ class DownloadService:
                 "error": None,
             }
             scope = f"批次 #{batch}" if mode == "batch" else "待下载列表"
+            if redownload:
+                scope += "（重新下载：按文件名跳过已存在文件）"
             self._log(f"开始下载 {scope} 的 {len(targets)} 部作品（格式 {fmt}）")
             self._thread = threading.Thread(
                 target=self._run, args=(key, origin, fmt, targets, subdir, mode, batch),
@@ -234,9 +245,18 @@ class DownloadService:
                     self._pause(config.DOWNLOAD_DELAY)
                     continue
 
-                target_path = download_dir / f"{gallery_id}.{ext}"
-                if target_path.exists() and target_path.stat().st_size > 0:
-                    self._log("  已存在同名文件，跳过下载")
+                target_path = download_dir / download_filename(gallery_id, title, ext)
+                existing = target_path if target_path.exists() else None
+                if existing is None:
+                    found = [f for f in download_dir.glob(f"{gallery_id}_*.{ext}")
+                             if f.is_file() and f.stat().st_size > 0]
+                    existing = found[0] if found else None
+                if existing is None:
+                    legacy = download_dir / f"{gallery_id}.{ext}"
+                    if legacy.is_file() and legacy.stat().st_size > 0:
+                        existing = legacy
+                if existing is not None:
+                    self._log(f"  已存在同名文件，跳过下载（{existing.name}）")
                     db.set_downloaded([gallery_id], True, self.db_path)
                     done += 1
                     self._progress(done=done, failed=failed)

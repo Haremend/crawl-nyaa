@@ -559,29 +559,39 @@ async function markDownloaded(ids, flag) {
   });
 }
 
-/** 立即下载：后端只返回下载地址，交给浏览器用用户自己的网络下载。 */
+/** 构造本服务的文件转发地址（同源 + attachment，浏览器会直接保存）。 */
+function redownloadEnabled() {
+  const box = $("redownloadCheck");
+  return Boolean(box && box.checked);
+}
+
+function downloadFileUrl(galleryId, format) {
+  const params = new URLSearchParams({
+    gallery_id: String(galleryId),
+    format: format || "zip",
+    apikey: state.key || "",
+  });
+  if (redownloadEnabled()) params.set("redownload", "1");
+  return "/api/download/file?" + params.toString();
+}
+
+/** 立即下载：由后端取签名并转发文件，浏览器直接保存到本地。 */
 async function downloadNow(galleryId, button) {
   const fmt = $("formatSelect").value || "zip";
   const original = button.textContent;
   button.disabled = true;
   button.textContent = "获取中…";
   try {
-    const data = await api("/api/download-url", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ gallery_id: galleryId, format: fmt }),
-    });
-    if (!data.url) throw new Error("未取到下载地址");
+    if (!state.key) throw new Error("请先填写 API Key");
+    // 同源地址 + 服务端 attachment 头 → 浏览器直接保存，不会跳转页面
     const link = document.createElement("a");
-    link.href = data.url;
-    link.download = data.filename || "";
-    link.rel = "noopener";
+    link.href = downloadFileUrl(galleryId, fmt);
     document.body.appendChild(link);
     link.click();
     link.remove();
-    toast("已获取下载地址，开始用你的网络下载" + (data.expires_at ? "（链接短时效，请尽快完成）" : ""));
+    toast("已开始下载（保存到你的电脑）");
   } catch (error) {
-    toast("取下载地址失败：" + error.message, "error");
+    toast("下载失败：" + error.message, "error");
   } finally {
     button.disabled = false;
     button.textContent = original;
@@ -607,7 +617,9 @@ async function saveCurrentBatch() {
     await api("/api/batch/save", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ batch_id: Number(state.batchId), format: fmt }),
+      body: JSON.stringify({
+        batch_id: Number(state.batchId), format: fmt, redownload: redownloadEnabled(),
+      }),
     });
     toast("已开始保存批次 #" + state.batchId + " 的全部数据");
     startDownloadPolling();
@@ -628,6 +640,7 @@ async function localLoop(mode, batchId) {
   try {
     const params = new URLSearchParams({ mode: mode });
     if (mode === "batch") params.set("batch_id", String(batchId));
+    if (redownloadEnabled()) params.set("redownload", "1");
     const plan = await api("/api/download/targets?" + params.toString(), { loadingText: "准备下载清单…" });
     const items = plan.items || [];
     if (!items.length) throw new Error(mode === "batch" ? "该批次没有可下载的作品" : "没有标记为「待下载」的作品");
@@ -647,17 +660,8 @@ async function localLoop(mode, batchId) {
       $("dlLogBox").textContent = (state.localLogs || []).slice(-10).join("\n");
 
       try {
-        const info = await api("/api/download-url", {
-          loadingText: "获取下载地址…",
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ gallery_id: gid, format: fmt }),
-        });
-        if (!info.url) throw new Error("未取到下载地址");
         const link = document.createElement("a");
-        link.href = info.url;
-        link.download = info.filename || "";
-        link.rel = "noopener";
+        link.href = downloadFileUrl(gid, fmt);
         document.body.appendChild(link);
         link.click();
         link.remove();
@@ -707,9 +711,9 @@ async function startDownloadAll() {
     await api("/api/download/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ format: fmt }),
+      body: JSON.stringify({ format: fmt, redownload: redownloadEnabled() }),
     });
-    toast("已开始批量下载");
+    toast(redownloadEnabled() ? "已开始重新下载（按文件名跳过已存在文件）" : "已开始批量下载");
     startDownloadPolling();
   } catch (error) {
     $("downloadAllBtn").disabled = false;

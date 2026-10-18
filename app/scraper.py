@@ -134,6 +134,11 @@ class Fetcher:
         request = urllib.request.Request(url, headers=self._headers(referer))
         return self._open_with_retry(request, url)
 
+    def open_stream(self, url: str, *, referer: str | None = None):
+        """打开流式响应（调用方负责关闭）。用于把大文件转发给浏览器，避免整块读进内存。"""
+        request = urllib.request.Request(url, headers=self._headers(referer))
+        return self._opener.open(request, timeout=self.timeout)
+
     def fetch_text(self, url: str, *, referer: str | None = None) -> str:
         body, _content_type, charset = self.fetch_raw(url, referer=referer)
         try:

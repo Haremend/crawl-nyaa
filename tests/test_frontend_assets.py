@@ -98,6 +98,18 @@ class ScriptGuardTests(unittest.TestCase):
         self.assertIn('id="setupHint"', html, "应有首次部署引导提示")
         self.assertIn("renderSetupHint", self.js)
 
+    def test_download_uses_server_relay(self):
+        """卡片下载必须走本服务的转发接口，不能把上游签名地址直接交给浏览器。"""
+        self.assertIn("/api/download/file", self.js, "应通过后端转发下载")
+        self.assertNotIn("link.href = data.url", self.js,
+                         "不应把上游地址直接赋给 download 链接（跨域会跳转且签名失效）")
+
+    def test_redownload_switch_wired(self):
+        html = HTML.read_text(encoding="utf-8")
+        self.assertIn('id="redownloadCheck"', html, "应有「重新下载」开关")
+        self.assertIn("redownloadEnabled()", self.js)
+        self.assertIn("redownload:", self.js, "请求里应带上 redownload")
+
     def test_no_credential_leak_in_assets(self):
         """前端资源里不应出现凭据相关的字样。
 

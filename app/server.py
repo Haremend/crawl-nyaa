@@ -15,15 +15,23 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 from . import config, covers as covers_mod, db
 from .downloader import DownloadService
+from .filenames import download_filename
 from .scraper import FetchError, Fetcher
 from .upstream import UpstreamClient, UpstreamError
 from .service import ScrapeError, ScrapeService
 
 
-def _download_filename(gallery_id: int, fmt: str) -> str:
-    """建议的下载文件名（前端 a[download] 用）。"""
+def _download_filename(gallery_id: int, fmt: str, title: str = "") -> str:
+    """下载文件名：{作品ID}_{作品名称}.{扩展名}（已做合规净化）。"""
     ext = fmt if fmt in ("zip", "cbz", "torrent") else "zip"
-    return f"{int(gallery_id)}.{ext}"
+    return download_filename(gallery_id, title, ext)
+
+
+def _content_disposition(filename: str) -> str:
+    """同时给出 ASCII 回退与 UTF-8 形式，兼容中文/日文标题。"""
+    ascii_fallback = filename.encode("ascii", "ignore").decode("ascii") or "download"
+    quoted = quote(filename, safe="")
+    return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quoted}"
 
 
 def normalize_origin(raw: str) -> str:
@@ -104,7 +112,7 @@ class ApiServer(ThreadingHTTPServer):
 class Handler(BaseHTTPRequestHandler):
     server_version = "claw-gallery/0.1"
     protocol_version = "HTTP/1.1"
-    quiet_paths = ("/api/scrape/status", "/api/thumb", "/static/")
+    quiet_paths = ("/api/scrape/status", "/api/thumb", "/api/download/file", "/static/")
 
     def log_message(self, format, *args):  # noqa: A002 - 保持父类签名
         message = format % args
@@ -193,13 +201,19 @@ class Handler(BaseHTTPRequestHandler):
                     if batch <= 0:
                         self._error("缺少 batch_id", 400)
                         return
-                    items = db.list_batch_targets(batch, self.server.db_path)
+                    items = db.list_batch_targets(
+                        batch, self.server.db_path,
+                        skip_downloaded=query.get("redownload", ["0"])[0] not in ("1", "true", "yes"))
                     self._json({"ok": True, "mode": "batch", "batch_id": batch,
                                 "items": items, "total": len(items)})
                 else:
-                    items = db.list_want_download_targets(self.server.db_path)
+                    items = db.list_want_download_targets(
+                        self.server.db_path,
+                        skip_downloaded=query.get("redownload", ["0"])[0] not in ("1", "true", "yes"))
                     self._json({"ok": True, "mode": "want", "items": items,
                                 "total": len(items)})
+            elif path == "/api/download/file":
+                self._handle_download_file(query)
             elif path == "/api/download/status":
                 self._json({"ok": True, **self.server.download_service.snapshot()})
             elif path == "/api/scrape/status":
@@ -362,6 +376,89 @@ class Handler(BaseHTTPRequestHandler):
             "per_page": payload.get("per_page", 25),
             "total": payload.get("total", len(items)),
         })
+
+    def _send_download_error(self, message: str, status: int = 400) -> None:
+        """下载接口出错时返回一个简单页面（而不是让浏览器停在 JSON 上）。"""
+        body = (
+            "<!doctype html><meta charset=\"utf-8\">"
+            "<title>下载失败</title>"
+            "<body style=\"font-family:system-ui,'Microsoft YaHei';padding:40px;color:#14161a\">"
+            f"<h2 style=\"color:#d6336c\">下载失败</h2><p>{message}</p>"
+            "<p><a href=\"/\" style=\"color:#1f5fbd\">← 返回应用</a></p></body>"
+        ).encode("utf-8")
+        self._send(body, "text/html; charset=utf-8", status)
+
+    def _handle_download_file(self, query: dict) -> None:
+        """把作品文件转发给浏览器（同源 + attachment）。
+
+        为什么不直接把上游下载地址交给浏览器：
+        1. 上游是签名短链，且与「取签名时的出口 IP/会话」绑定；后端若走代理取签名，
+           浏览器直连必然报 `Invalid signature`；
+        2. 跨域地址上的 download 属性会被浏览器忽略，点击会变成页面跳转。
+        因此由后端取签名并流式转发，浏览器只跟本服务打交道。
+        """
+        api_key = self._api_key(query)
+        if not api_key:
+            self._send_download_error("需要 API Key：请先在页面门禁里填写并保存。", 401)
+            return
+        origin = db.get_site_origin(self.server.db_path)
+        if not origin:
+            self._send_download_error("未知站点地址：请先在门禁里填写站点域名。", 400)
+            return
+        try:
+            gallery_id = int((query.get("gallery_id", ["0"])[0] or 0))
+        except (TypeError, ValueError):
+            gallery_id = 0
+        if gallery_id <= 0:
+            self._send_download_error("缺少有效的 gallery_id。", 400)
+            return
+        fmt = (query.get("format", ["zip"])[0] or "zip").lower()
+        if fmt not in ("zip", "cbz", "torrent"):
+            fmt = "zip"
+
+        try:
+            info = UpstreamClient(origin, api_key).get_download_url(gallery_id, fmt)
+        except UpstreamError as exc:
+            self._send_download_error(f"取下载地址失败：{exc}", exc.status or 502)
+            return
+        url = str(info.get("url") or "")
+        if not url:
+            self._send_download_error("上游未返回下载地址。", 502)
+            return
+
+        title = db.get_title(gallery_id, self.server.db_path)
+        filename = _download_filename(gallery_id, fmt, title)
+        fetcher = Fetcher()
+        try:
+            response = fetcher.open_stream(url, referer=f"{origin}/g/{gallery_id}/")
+        except FetchError as exc:
+            self._send_download_error(f"下载失败：{exc}", 502)
+            return
+        try:
+            content_type = response.headers.get_content_type() or "application/octet-stream"
+            length = response.headers.get("Content-Length")
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Disposition", _content_disposition(filename))
+            if length:
+                self.send_header("Content-Length", str(length))
+            else:
+                # 长度未知：靠关闭连接告诉浏览器下载结束
+                self.close_connection = True
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            while True:
+                chunk = response.read(65536)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+        except (OSError, FetchError):
+            self.close_connection = True
+        finally:
+            try:
+                response.close()
+            except Exception:
+                pass
 
     def _handle_thumb(self, query: dict) -> None:
         raw = (query.get("u", [""])[0] or "").strip()
@@ -572,7 +669,8 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     state = self.server.download_service.start(
                         api_key, str(payload.get("format") or "zip"),
-                        mode="batch", batch_id=int(payload.get("batch_id") or 0))
+                        mode="batch", batch_id=int(payload.get("batch_id") or 0),
+                        redownload=bool(payload.get("redownload", False)))
                 except UpstreamError as exc:
                     self._error(str(exc), exc.status or 400)
                     return
@@ -597,7 +695,8 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 try:
                     state = self.server.download_service.start(
-                        api_key, str(payload.get("format") or "zip"))
+                        api_key, str(payload.get("format") or "zip"),
+                        redownload=bool(payload.get("redownload", False)))
                 except UpstreamError as exc:
                     self._error(str(exc), exc.status or 400)
                     return

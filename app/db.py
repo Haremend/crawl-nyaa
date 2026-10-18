@@ -891,8 +891,12 @@ def set_want_download(gallery_ids: Sequence[int], want: bool, path: str | Path |
     return updated
 
 
-def list_batch_targets(batch_id: int, path: str | Path | None = None) -> list[dict]:
-    """返回某个批次的全部作品（每部取推荐版本）。"""
+def list_batch_targets(batch_id: int, path: str | Path | None = None,
+                       *, skip_downloaded: bool = True) -> list[dict]:
+    """返回某个批次的全部作品（每部取推荐版本）。
+
+    skip_downloaded=True 时跳过本地已标记「已下载」的作品（重新下载模式传 False）。
+    """
     batch = int(batch_id or 0)
     if batch <= 0:
         return []
@@ -905,6 +909,9 @@ def list_batch_targets(batch_id: int, path: str | Path | None = None) -> list[di
         return []
     targets: list[dict] = []
     for group in _cluster_rows(rows, True):
+        # 非重新下载模式：先按数据库的「已下载」标记跳过
+        if skip_downloaded and any((row["downloaded"] or 0) for row in group):
+            continue
         ordered = sorted(group, key=lambda row: _variant_rank(row, []))
         main = ordered[0]
         targets.append({
@@ -915,11 +922,14 @@ def list_batch_targets(batch_id: int, path: str | Path | None = None) -> list[di
     return targets
 
 
-def list_want_download_targets(path: str | Path | None = None) -> list[dict]:
+def list_want_download_targets(path: str | Path | None = None,
+                               *, skip_downloaded: bool = True) -> list[dict]:
     """返回所有「待下载」作品，每部取该作品的**推荐版本**。
 
     注意：判断「是否待下载」是按整个作品组来的 —— 只要组内有任意一个版本被标记，
     就下载该组按优先级选出的推荐版本（避免标记后推荐版本变化导致下错版本）。
+
+    skip_downloaded=True 时跳过本地已标记「已下载」的作品（重新下载模式传 False）。
     """
     conn = connect(path)
     try:
@@ -932,6 +942,9 @@ def list_want_download_targets(path: str | Path | None = None) -> list[dict]:
     targets: list[dict] = []
     for group in _cluster_rows(rows, True):
         if not any((row["want_download"] or 0) for row in group):
+            continue
+        # 非重新下载模式：先按数据库的「已下载」标记跳过
+        if skip_downloaded and any((row["downloaded"] or 0) for row in group):
             continue
         ordered = sorted(group, key=lambda row: _variant_rank(row, []))
         main = ordered[0]
@@ -1005,6 +1018,24 @@ def get_site_origin(path: str | Path | None = None) -> str:
         if parts.scheme and parts.netloc:
             return f"{parts.scheme}://{parts.netloc}"
     return ""
+
+
+def get_title(gallery_id: int, path: str | Path | None = None, fallback: str = "") -> str:
+    """取作品标题（优先简洁标题），用于生成下载文件名。"""
+    gid = _optional_int(gallery_id) or 0
+    if gid <= 0:
+        return fallback
+    conn = connect(path)
+    try:
+        row = conn.execute(
+            "SELECT title_pretty, title FROM galleries WHERE gallery_id = ?", (gid,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return fallback
+    value = (row["title_pretty"] or row["title"] or "").strip()
+    return value or fallback
 
 
 def get_setting(key: str, default: str = "", path: str | Path | None = None) -> str:

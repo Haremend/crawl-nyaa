@@ -135,6 +135,10 @@
           <option value="torrent">torrent（限流严格）</option>
         </select>
       </label>
+      <label class="check">
+        <input id="redownloadCheck" type="checkbox">
+        <span>重新下载<br><small>忽略数据库「已下载」标记，仅按文件名跳过已存在的文件</small></span>
+      </label>
       <div class="actions">
         <button id="downloadAllBtn" class="btn primary">下载全部「待下载」</button>
         <button id="downloadCancelBtn" class="btn ghost" disabled>停止</button>
