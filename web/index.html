@@ -16,7 +16,7 @@
     <p class="gate-desc">本工具通过 API Key 访问站点接口。Key 仅保存在你自己的浏览器 cookie 中，不会写入服务端。</p>
     <label class="field">
       <span>API Key</span>
-      <input id="gateInput" type="password" spellcheck="false" placeholder="nhk_..." autocomplete="off">
+      <input id="gateInput" type="password" spellcheck="false" placeholder="在此粘贴 API Key" autocomplete="off">
     </label>
     <div class="gate-actions">
       <button id="gateBtn" class="btn primary">确定进入</button>
@@ -106,6 +106,12 @@
 
   <section class="panel">
     <div class="panel-title">一键下载</div>
+    <div class="save-mode" role="group" aria-label="保存位置">
+      <span class="save-mode-label">保存位置</span>
+      <button class="save-mode-btn active" data-save-mode="server">服务器保存</button>
+      <button class="save-mode-btn" data-save-mode="local">本地保存</button>
+      <span class="save-mode-hint" id="saveModeHint">下载到服务器项目的 download/ 目录</span>
+    </div>
     <div class="download-form">
       <label class="field">
         <span>下载格式</span>

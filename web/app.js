@@ -17,6 +17,9 @@ const state = {
   perPage: 48,
   data: null,
   meta: null,
+  saveMode: "server",
+  localCancel: false,
+  localRunning: false,
   batchId: "",
   batches: [],
   batchSearch: "",
@@ -227,6 +230,15 @@ function renderBatchOptions() {
   }
   select.innerHTML = options.join("");
   renderBatchInfo();
+}
+
+function renderSaveMode() {
+  document.querySelectorAll(".save-mode-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.saveMode === state.saveMode);
+  });
+  $("saveModeHint").textContent = state.saveMode === "server"
+    ? "下载到服务器项目的 download/ 目录，完成后自动标记「已下载」"
+    : "后端只返回下载地址，由浏览器循环下载到你自己的电脑";
 }
 
 function renderBatchInfo() {
@@ -467,6 +479,12 @@ async function saveCurrentBatch() {
     toast("请先在顶部选择一个批次", "error");
     return;
   }
+  if (state.saveMode === "local") {
+    $("saveBatchBtn").disabled = true;
+    $("downloadCancelBtn").disabled = false;
+    await localLoop("batch", Number(state.batchId));
+    return;
+  }
   const fmt = $("formatSelect").value || "zip";
   $("saveBatchBtn").disabled = true;
   $("dlProgressPanel").hidden = false;
@@ -484,7 +502,88 @@ async function saveCurrentBatch() {
   }
 }
 
+/** 浏览器端循环下载：逐条取下载地址并触发保存到用户电脑。 */
+async function localLoop(mode, batchId) {
+  if (state.localRunning) { toast("本地下载进行中", "error"); return; }
+  state.localRunning = true;
+  state.localCancel = false;
+  $("dlProgressPanel").hidden = false;
+  const fmt = $("formatSelect").value || "zip";
+
+  try {
+    const params = new URLSearchParams({ mode: mode });
+    if (mode === "batch") params.set("batch_id", String(batchId));
+    const plan = await api("/api/download/targets?" + params.toString());
+    const items = plan.items || [];
+    if (!items.length) throw new Error(mode === "batch" ? "该批次没有可下载的作品" : "没有标记为「待下载」的作品");
+
+    const total = items.length;
+    let done = 0, failed = 0;
+    for (let index = 0; index < total; index += 1) {
+      if (state.localCancel) break;
+      const target = items[index];
+      const gid = target.gallery_id;
+      const bar = $("dlProgressBar");
+      bar.classList.remove("indeterminate");
+      bar.style.width = Math.round((index / total) * 100) + "%";
+      $("dlProgressText").innerHTML = "本地保存中：" + (index + 1) + "/" + total
+        + " · 成功 " + done + (failed ? " · 失败 " + failed : "")
+        + " · 当前 #" + esc(gid) + " " + esc(String(target.title || "").slice(0, 30));
+      $("dlLogBox").textContent = (state.localLogs || []).slice(-10).join("\n");
+
+      try {
+        const info = await api("/api/download-url", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ gallery_id: gid, format: fmt }),
+        });
+        if (!info.url) throw new Error("未取到下载地址");
+        const link = document.createElement("a");
+        link.href = info.url;
+        link.download = info.filename || "";
+        link.rel = "noopener";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        done += 1;
+        // 地址已交给浏览器，标记为已下载（尽力而为）
+        try { await markDownloaded([gid], true); } catch (error) { /* 忽略 */ }
+        state.localLogs = (state.localLogs || []).concat(
+          "[" + new Date().toLocaleTimeString("zh-CN", { hour12: false }) + "] #" + gid + " 已交给浏览器下载");
+      } catch (error) {
+        failed += 1;
+        state.localLogs = (state.localLogs || []).concat("#" + gid + " 失败：" + error.message);
+      }
+      // 浏览器对连续下载有限制，逐条之间留间隔
+      if (index < total - 1 && !state.localCancel) await sleep(1500);
+    }
+
+    const bar = $("dlProgressBar");
+    bar.style.width = "100%";
+    $("dlProgressText").innerHTML = (state.localCancel ? "本地保存已停止" : "本地保存完成")
+      + " · 成功 " + done + " / " + total + (failed ? " · 失败 " + failed : "");
+    $("dlLogBox").textContent = (state.localLogs || []).slice(-12).join("\n");
+    toast((state.localCancel ? "已停止" : "本地保存完成") + "：成功 " + done + "，失败 " + failed, failed ? "error" : "ok");
+    await reloadAll();
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    state.localRunning = false;
+    $("downloadAllBtn").disabled = false;
+    $("saveBatchBtn").disabled = false;
+    $("downloadCancelBtn").disabled = true;
+  }
+}
+
+function sleep(ms) { return new Promise((resolve) => window.setTimeout(resolve, ms)); }
+
 async function startDownloadAll() {
+  if (state.saveMode === "local") {
+    $("downloadAllBtn").disabled = true;
+    $("downloadCancelBtn").disabled = false;
+    await localLoop("want", 0);
+    return;
+  }
   const fmt = $("formatSelect").value || "zip";
   $("downloadAllBtn").disabled = true;
   $("dlProgressPanel").hidden = false;
@@ -674,9 +773,21 @@ function bindEvents() {
     renderBatchOptions();
   });
 
+  document.querySelectorAll(".save-mode-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (state.localRunning) { toast("本地下载进行中，无法切换", "error"); return; }
+      state.saveMode = btn.dataset.saveMode;
+      renderSaveMode();
+    });
+  });
   $("saveBatchBtn").addEventListener("click", saveCurrentBatch);
   $("downloadAllBtn").addEventListener("click", startDownloadAll);
   $("downloadCancelBtn").addEventListener("click", async () => {
+    if (state.localRunning) {
+      state.localCancel = true;
+      toast("已请求停止本地下载");
+      return;
+    }
     try { await api("/api/download/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); toast("已发送停止请求"); }
     catch (error) { toast(error.message, "error"); }
   });
@@ -784,6 +895,7 @@ function bindEvents() {
  * ================================================================== */
 (async function init() {
   bindEvents();
+  renderSaveMode();
   initApiKey();
   if (!state.key) {
     showGate();

@@ -6,6 +6,7 @@ __pycache__/
 # 本地数据与抓取产物（不要提交）
 data/
 cover/
+download/
 
 # 测试临时目录
 .test-tmp/

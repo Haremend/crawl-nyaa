@@ -158,6 +158,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "batches": db.list_batches(self.server.db_path)})
             elif path == "/api/site-favorites":
                 self._handle_site_favorites(query)
+            elif path == "/api/download/targets":
+                mode = (query.get("mode", ["want"])[0] or "want").lower()
+                if mode == "batch":
+                    batch = _int_param(query, "batch_id", 0, 0, 10 ** 9)
+                    if batch <= 0:
+                        self._error("缺少 batch_id", 400)
+                        return
+                    items = db.list_batch_targets(batch, self.server.db_path)
+                    self._json({"ok": True, "mode": "batch", "batch_id": batch,
+                                "items": items, "total": len(items)})
+                else:
+                    items = db.list_want_download_targets(self.server.db_path)
+                    self._json({"ok": True, "mode": "want", "items": items,
+                                "total": len(items)})
             elif path == "/api/download/status":
                 self._json({"ok": True, **self.server.download_service.snapshot()})
             elif path == "/api/scrape/status":
