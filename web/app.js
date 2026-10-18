@@ -750,11 +750,14 @@ let favSearchTimer = null;
 function bindEvents() {
   $("gateBtn").addEventListener("click", submitGate);
   $("gateInput").addEventListener("keydown", (event) => { if (event.key === "Enter") submitGate(); });
-  $("gateClear").addEventListener("click", () => {
+  const clearKey = (message) => {
     deleteCookie(KEY_COOKIE);
     state.key = "";
-    toast("已清除浏览器里保存的 Key");
-  });
+    toast(message);
+    showGate("已清除保存的 Key，请重新输入。");
+  };
+  $("gateClear").addEventListener("click", () => clearKey("已清除浏览器里保存的 Key"));
+  $("changeKeyBtn").addEventListener("click", () => clearKey("已清除保存的 Key，请重新输入"));
 
   document.querySelectorAll(".tab").forEach((btn) => {
     btn.addEventListener("click", () => switchTab(btn.dataset.tab));
