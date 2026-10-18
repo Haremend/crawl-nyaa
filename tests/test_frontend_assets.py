@@ -61,6 +61,24 @@ class ScriptGuardTests(unittest.TestCase):
         self.assertIn('id="proxyBtn"', html, "顶部应有代理开关按钮")
         self.assertIn("/api/settings/proxy", self.js, "代理开关应调用后端接口")
 
+    def test_loading_overlay_wired(self):
+        """所有后端请求都应经过 api()，由它统一控制全局加载遮罩。"""
+        html = HTML.read_text(encoding="utf-8")
+        self.assertIn('id="loadingOverlay"', html, "页面应有全局加载遮罩")
+        self.assertIn('id="loadingText"', html, "遮罩应有提示文案节点")
+        css = CSS.read_text(encoding="utf-8")
+        self.assertIn(".loading-overlay", css, "遮罩应有样式")
+        self.assertIn("display: flex", css)
+        for fn in ("function showLoading(", "function hideLoading("):
+            self.assertIn(fn, self.js, f"缺少 {fn}")
+        self.assertIn("showLoading(options.loadingText", self.js, "api() 应在请求前显示遮罩")
+        self.assertIn("if (!silent) hideLoading();", self.js, "api() 应在请求后隐藏遮罩")
+
+    def test_polling_requests_are_silent(self):
+        """轮询接口不能弹遮罩，否则每秒闪一次。"""
+        self.assertIn('api("/api/scrape/status", { silent: true })', self.js)
+        self.assertIn('api("/api/download/status", { silent: true })', self.js)
+
     def test_no_brand_leak_in_assets(self):
         for path in (CSS, JS, HTML):
             text = path.read_text(encoding="utf-8").lower()

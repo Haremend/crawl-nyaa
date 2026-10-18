@@ -126,11 +126,50 @@ function fmtDate(iso) {
   return Number.isNaN(date.getTime()) ? String(iso).slice(0, 10) : date.toLocaleDateString("zh-CN");
 }
 
+/* ---------- 全局加载遮罩 ----------
+ * 用计数处理并发请求；请求很快时（<120ms）不显示，避免闪烁。
+ */
+let loadingCount = 0;
+let loadingTimer = null;
+let loadingShownAt = 0;
+
+function showLoading(text) {
+  loadingCount += 1;
+  if (loadingTimer || !$("loadingOverlay").hidden) return;
+  loadingTimer = window.setTimeout(() => {
+    loadingTimer = null;
+    if (loadingCount <= 0) return;
+    $("loadingText").textContent = text || "加载中…";
+    $("loadingOverlay").hidden = false;
+    loadingShownAt = Date.now();
+  }, 120);
+}
+
+function hideLoading() {
+  loadingCount = Math.max(0, loadingCount - 1);
+  if (loadingCount > 0) return;
+  if (loadingTimer) { window.clearTimeout(loadingTimer); loadingTimer = null; }
+  const shownFor = Date.now() - loadingShownAt;
+  const finish = () => { $("loadingOverlay").hidden = true; };
+  if (!$("loadingOverlay").hidden && shownFor < 250) {
+    window.setTimeout(finish, 250 - shownFor);
+  } else {
+    finish();
+  }
+}
+
 async function api(path, options = {}) {
   const opts = Object.assign({}, options);
   opts.headers = Object.assign({}, options.headers || {});
   if (state.key) opts.headers["X-API-Key"] = state.key;
-  const response = await fetch(path, opts);
+  const silent = Boolean(options.silent);
+  if (!silent) showLoading(options.loadingText || "加载中…");
+  let response;
+  try {
+    response = await fetch(path, opts);
+  } finally {
+    if (!silent) hideLoading();
+  }
   let data = {};
   try { data = await response.json(); } catch (error) { /* 非 JSON */ }
   if (response.status === 401) {
@@ -278,7 +317,7 @@ function applyBatch(batchId) {
  * 作品库
  * ================================================================== */
 async function loadWorks() {
-  const data = await api("/api/works?" + buildParams().toString());
+  const data = await api("/api/works?" + buildParams().toString(), { loadingText: "加载作品列表…" });
   state.data = data;
   state.page = data.page;
   renderStats(data);
@@ -525,7 +564,7 @@ async function localLoop(mode, batchId) {
   try {
     const params = new URLSearchParams({ mode: mode });
     if (mode === "batch") params.set("batch_id", String(batchId));
-    const plan = await api("/api/download/targets?" + params.toString());
+    const plan = await api("/api/download/targets?" + params.toString(), { loadingText: "准备下载清单…" });
     const items = plan.items || [];
     if (!items.length) throw new Error(mode === "batch" ? "该批次没有可下载的作品" : "没有标记为「待下载」的作品");
 
@@ -545,6 +584,7 @@ async function localLoop(mode, batchId) {
 
       try {
         const info = await api("/api/download-url", {
+          loadingText: "获取下载地址…",
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ gallery_id: gid, format: fmt }),
@@ -626,7 +666,7 @@ function stopDownloadPolling() {
 async function pollDownload() {
   let status;
   try {
-    status = await api("/api/download/status");
+    status = await api("/api/download/status", { silent: true });
   } catch (error) {
     stopDownloadPolling();
     $("downloadAllBtn").disabled = false;
@@ -690,7 +730,7 @@ function stopPolling() { if (state.scrapePolling) { window.clearInterval(state.s
 
 async function pollStatus() {
   let status;
-  try { status = await api("/api/scrape/status"); }
+  try { status = await api("/api/scrape/status", { silent: true }); }
   catch (error) { stopPolling(); $("startBtn").disabled = false; return; }
   renderProgress(status);
   $("startBtn").disabled = Boolean(status.running);
