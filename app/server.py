@@ -388,6 +388,7 @@ class Handler(BaseHTTPRequestHandler):
         if items:
             # 同步进本地库，这样「待下载/已下载」标记与排序都能复用同一套逻辑
             db.upsert_items(items, source_url=f"{origin}/favorites", path=self.server.db_path)
+            db.set_site_favorite([item["gallery_id"] for item in items], True, self.server.db_path)
 
         self._json({
             "ok": True,
@@ -704,6 +705,7 @@ class Handler(BaseHTTPRequestHandler):
                         delay=payload.get("delay"),
                         enrich=payload.get("enrich"),
                         covers=payload.get("covers"),
+                        incremental=payload.get("incremental"),
                     )
                 except ScrapeError as exc:
                     busy = "正在进行" in str(exc)
@@ -740,6 +742,49 @@ class Handler(BaseHTTPRequestHandler):
                                                bool(payload.get("want", False)),
                                                self.server.db_path)
                 self._json({"ok": True, "updated": updated})
+            elif path == "/api/hidden":
+                payload = self._read_json()
+                if payload is None:
+                    return
+                updated = db.set_hidden(payload.get("ids", []),
+                                        bool(payload.get("hidden", False)),
+                                        self.server.db_path)
+                self._json({"ok": True, "updated": updated})
+            elif path == "/api/favorites/sync":
+                payload = self._read_json()
+                if payload is None:
+                    return
+                api_key = self._api_key(parse_qs(urlsplit(self.path).query))
+                if not api_key:
+                    self._error("该接口需要 API Key", 401)
+                    return
+                origin = db.get_site_origin(self.server.db_path)
+                if not origin:
+                    self._error("未知站点地址：请先抓取一次列表页", 400)
+                    return
+                client = UpstreamClient(origin, api_key)
+                # 遍历收藏所有页，把全部收藏作品在本地标记为「待下载」
+                synced = 0
+                page = 1
+                while True:
+                    payload_data = client.list_favorites(page=page)
+                    items = payload_data.get("items") or []
+                    if not items:
+                        break
+                    for item in items:
+                        item["site_favorite"] = 1
+                        item["from_scrape"] = 0
+                        item["url"] = f"{origin}/g/{item['gallery_id']}/"
+                    if items:
+                        ids = [item["gallery_id"] for item in items]
+                        db.upsert_items(items, source_url=f"{origin}/favorites", path=self.server.db_path)
+                        db.set_site_favorite(ids, True, self.server.db_path)
+                    synced += db.set_want_download([item["gallery_id"] for item in items], True, self.server.db_path)
+                    num_pages = int(payload_data.get("num_pages") or 1)
+                    if page >= num_pages:
+                        break
+                    page += 1
+                self._json({"ok": True, "synced": synced, "pages": page})
             elif path == "/api/downloaded":
                 payload = self._read_json()
                 if payload is None:

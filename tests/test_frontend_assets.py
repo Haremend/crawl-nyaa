@@ -104,6 +104,21 @@ class ScriptGuardTests(unittest.TestCase):
         self.assertNotIn("link.href = data.url", self.js,
                          "不应把上游地址直接赋给 download 链接（跨域会跳转且签名失效）")
 
+    def test_hidden_button_wired(self):
+        """卡片隐藏按钮：逻辑删除应通过后端接口，并重新加载列表。"""
+        html = HTML.read_text(encoding="utf-8")
+        self.assertIn("hide-btn", self.js, "卡片应有隐藏按钮")
+        self.assertIn("data-hide-ids", self.js, "隐藏按钮应带上作品的全部版本 ID")
+        self.assertIn("/api/hidden", self.js, "隐藏按钮应调用后端接口")
+        self.assertIn("setHidden(ids, true)", self.js, "隐藏按钮应对整部作品的版本标记 hidden=true")
+
+    def test_favorites_sync_wired(self):
+        """收藏同步：应有一键将站点收藏全部标记为待下载的按钮与接口。"""
+        html = HTML.read_text(encoding="utf-8")
+        self.assertIn('id="favSyncBtn"', html, "收藏页应有「同步收藏为待下载」按钮")
+        self.assertIn("/api/favorites/sync", self.js, "应调用同步接口")
+        self.assertIn("syncFavoritesToWant", self.js)
+
     def test_redownload_switch_wired(self):
         html = HTML.read_text(encoding="utf-8")
         self.assertIn('id="redownloadCheck"', html, "应有「重新下载」开关")

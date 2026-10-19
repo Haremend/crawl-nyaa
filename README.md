@@ -8,6 +8,8 @@
 
 一句话：把画廊列表页抓成本地库，按自己的规则**去重、排序、标记、下载**，并可用 API Key 关联站点账号。
 
+> 功能完成状态与测试记录见 [`功能清单.md`](功能清单.md)；关键实现设计见 [`详细设计.md`](详细设计.md)。
+
 ### 1. 抓取
 
 - 前端输入任意**列表页 URL**（`/group/`、`/artist/`、`/tag/`、`/parody/`、`/character/`、`/language/`、`/search`）即可抓取
@@ -18,8 +20,15 @@
 - 可选：**详情补全**（原始标题 + 完整标签 + 页数/收藏数/上传时间）、**封面下载**到 `cover/`
 - **批次号**：每次抓取生成一个批次（`#N`），记录来源 URL、时间、本批入库作品数
   - 页面顶部有**批次号下拉搜索框**，可按批次号或来源 URL 过滤，并显示「这一批是抓取哪个 URL 得到的」
-- **重复数据不覆盖原始记录**：不同批次抓到**完全相同**的数据时，保留最早那次的记录与批次号，
-  只刷新 `last_seen`；只有数据确实变化（标题/标签/页数等）才更新，并记为新批次
+- **重复数据不覆盖原始记录**：库中已存在的作品，无论从哪个 URL / 批次再抓到，都**一律跳过**：
+  不更新标题/标签/页数/批次等任何字段，只刷新 `last_seen`；保留最早那次的记录与批次号
+- **增量抓取**：同一 URL 已有成功批次时，从最新一页开始抓，**遇到任意已收录条目即停止翻页**
+  （前置假设：上游列表按时间倒序）；可用 `CLAW_INCREMENTAL=0` 关闭
+- **空批次不保留**：本次抓取新增 0 条时删除临时批次号，不留空批次
+- **同 URL 只保留最新批次**：抓取成功后清理该 URL 的旧批次、把旧条目归属并入最新批次，
+  「保存全部（当前批次）」始终拿到该地址的最新完整清单
+- **隐藏（逻辑删除）**：卡片「隐藏」按钮；隐藏作品不展示、不下载，再次抓取到同样跳过
+- **收藏同步**：收藏 tab 一键把站点账号收藏全部标记为本地「待下载」（不覆盖已有作品记录）
 
 ### 2. 同作品去重（三层策略）
 
@@ -122,7 +131,7 @@ claw-gallery/
 │   ├── config.py         # 全局配置（代理、限速、路径、语言标签映射）
 │   ├── parser.py         # 画廊列表页 HTML 解析（标准库 HTMLParser + 正则降级）
 │   ├── titles.py         # 标题指纹与「同一作品」判定（列表页/详情页共用）
-│   ├── detail.py         # 详情 API 客户端（原始标题、标签、页数、收藏数）`r`n│   ├── covers.py         # 封面下载（保存到 cover/，文件名 <gallery_id>.<ext>）
+│   ├── detail.py         # 详情 API 客户端（原始标题、标签、页数、收藏数）
 │   ├── scraper.py        # HTTP 抓取（代理、重试、限速、翻页生成器）
 │   ├── db.py             # SQLite 存取层（幂等入库、聚类去重、语言过滤、查询）
 │   ├── service.py        # 抓取任务管理（后台线程、进度、取消、逐页入库）
@@ -132,7 +141,7 @@ claw-gallery/
 │   ├── index.html
 │   ├── style.css
 │   └── app.js
-├── cover/                # 封面图片输出目录（文件名 = 作品 ID）`r`n├── samples/listing_demo.html   # 离线解析样本（同时用于单元测试）
+├── cover/                # 封面图片输出目录（文件名 = 作品 ID）
 ├── tests/                # 单元测试 + 本地服务冒烟测试（不访问外网）
 └── data/gallery.sqlite3  # 运行后生成的数据库（已 gitignore）
 ```
@@ -152,13 +161,14 @@ claw-gallery/
 | GET | `/api/meta` | 代理、数据库路径、库统计、批次列表、上次抓取记录 |
 | GET | `/api/batches` | 批次列表（批次号 / 来源 URL / 时间 / 本批作品数） |
 | GET | `/api/works` | 列表查询，参数：`q`、`lang`（可重复）、`dedupe=0/1`、`uncensored=1`、`want=1`、`downloaded=1`、`site_favorites=1`、`batch=<批次号>`、`sort`（`priority`/`recent`/`oldest`/`title`/`original`/`variants`/`favorites`/`pages`）、`page`、`per_page` |
-| POST | `/api/scrape` | 启动抓取，JSON：`{"url": "...", "max_pages": 0, "delay": 1.2, "enrich": true}`（`enrich` 控制详情补全） |
+| POST | `/api/scrape` | 启动抓取，JSON：`{"url": "...", "max_pages": 0, "delay": 1.2, "enrich": true, "covers": true, "incremental": true}`（`incremental` 控制增量抓取） |
 | GET | `/api/scrape/status` | 抓取进度快照（含日志） |
 | POST | `/api/scrape/cancel` | 取消当前抓取（已抓数据保留） |
 | GET | `/api/thumb?u=<url>` | 代理缩略图（只接受 http/https 地址，磁盘缓存） |
 | GET | `/covers/<id>.<ext>` | 本地已下载封面（文件名白名单校验，防路径穿越） |
 | GET | `/api/export.csv` | 按当前筛选导出 CSV（UTF-8 BOM，Excel 可直接打开） |
 | POST | `/api/want-download` | 标记/取消「待下载」，JSON：`{"ids": [123], "want": true}` |
+| POST | `/api/hidden` | 隐藏 / 恢复作品（逻辑删除），JSON：`{"ids": [123], "hidden": true}` |
 | POST | `/api/downloaded` | 标记/取消「已下载」，JSON：`{"ids": [123], "downloaded": true}` |
 | POST | `/api/download-url` | 取单个作品的下载地址（需 Key），返回给浏览器自行下载 |
 | POST | `/api/download/start` | 一键下载所有「待下载」作品（需 Key，保存到 `download/`） |
@@ -166,6 +176,7 @@ claw-gallery/
 | GET | `/api/download/status` | 批量下载进度 |
 | POST | `/api/download/cancel` | 停止批量下载 |
 | GET | `/api/site-favorites` | 站点账号收藏列表（需 Key），同步进本地库后按默认规则排序 |
+| POST | `/api/favorites/sync` | 一键把站点收藏全部标记为本地「待下载」（需 Key） |
 | GET | `/api/download/jobs` | 下载队列快照（所有任务与进度，任何标签页可见） |
 | POST | `/api/download/enqueue` | 单个作品入队：`{"gallery_id": 123, "format": "zip"}` |
 | POST | `/api/download/jobs/cancel` | 取消任务：`{"job_id": 1}` 或 `{"all": true}` |
@@ -303,6 +314,7 @@ cp .env.example .env    # 生成模板后按需修改
 | `CLAW_DOWNLOAD_MODE` | `stream` | 立即下载模式：`cache`（先落盘再转发）/ `stream`（流式转发） |
 | `CLAW_API_ORIGIN` | 空 | 上游 API 站点地址；留空则自动取最近一次抓取的列表页地址 |
 | `CLAW_MAX_PAGES` | `200` | 单次抓取页数上限（前端可再限制） |
+| `CLAW_INCREMENTAL` | `1` | 增量抓取开关：`0` = 每次完整抓取 |
 | `CLAW_HOST` / `CLAW_PORT` | `127.0.0.1` / `8787` | 本地服务监听地址 |
 | `CLAW_DB` / `CLAW_DATA_DIR` | `data/gallery.sqlite3` | 数据库路径 / 数据目录 |
 | `CLAW_UA` | 内置 UA | 自定义 User-Agent |
@@ -316,7 +328,9 @@ cd claw-gallery
 python -m unittest discover -s tests -v
 ```
 
-测试使用 `samples/listing_demo.html` 离线样本，覆盖：列表解析（标题/标签/语言/缩略图/分页）、ID 与同作品去重、语言过滤与统计、搜索、CSV/API 冒烟测试，全部不访问外网。
+当前共 **173 项**测试，全部不访问外网。使用 `samples/listing_demo.html` 离线样本，覆盖：列表解析（标题/标签/语言/缩略图/分页）、ID 与同作品去重、语言过滤与统计、搜索、隐藏 / 增量抓取 / 批次合并 / 收藏同步、下载队列与两种下载模式、CSV/API 冒烟测试。
+
+功能完成状态与测试日期见 [`功能清单.md`](功能清单.md)，关键设计见 [`详细设计.md`](详细设计.md)。
 
 ## 注意事项
 

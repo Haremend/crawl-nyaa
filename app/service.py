@@ -71,7 +71,7 @@ class ScrapeService:
 
     def start(self, url: str, max_pages: int | str | None = 0,
               delay: float | str | None = None, enrich: bool | None = None,
-              covers: bool | None = None) -> dict:
+              covers: bool | None = None, incremental: bool | None = None) -> dict:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 raise ScrapeError("已有抓取任务正在进行，请等待完成或点击取消")
@@ -88,6 +88,7 @@ class ScrapeService:
             delay_value = max(config.MIN_PAGE_DELAY, min(10.0, delay_value))
             enrich_enabled = self._bool_option(enrich, config.ENRICH_DEFAULT)
             covers_on = self._bool_option(covers, config.COVER_DEFAULT)
+            incremental_on = self._bool_option(incremental, config.INCREMENTAL)
 
             site_domain = urlsplit(clean_url).hostname or ""
             # 抓取时把站点地址同步进设置，和门禁里填的域名保持一致
@@ -116,6 +117,7 @@ class ScrapeService:
                 "covers_failed": 0,
                 "enrich": enrich_enabled,
                 "covers": covers_on,
+                "incremental": incremental_on,
                 "error": None,
                 "max_pages": pages,
                 "delay": delay_value,
@@ -129,8 +131,16 @@ class ScrapeService:
                 self._log("未开启详情补全：仅使用列表页数据，去重依赖标题指纹")
             if covers_on:
                 self._log(f"已开启封面下载：保存到 {config.COVER_DIR}")
+            if incremental_on:
+                latest = db.latest_run_for_url(clean_url, self.db_path)
+                if latest:
+                    self._log(f"增量抓取：发现该地址上次成功批次 #{latest['run_id']}，遇到已收录条目即停止")
+                else:
+                    self._log("增量抓取：首次抓取该地址，将完整抓取")
+            else:
+                self._log("增量抓取已关闭：将完整抓取整个列表")
             self._thread = threading.Thread(
-                target=self._run, args=(run_id, clean_url, pages, delay_value, enrich_enabled, covers_on, site_domain),
+                target=self._run, args=(run_id, clean_url, pages, delay_value, enrich_enabled, covers_on, site_domain, incremental_on),
                 name="gallery-scrape", daemon=True,
             )
             self._thread.start()
@@ -177,6 +187,7 @@ class ScrapeService:
             "covers_failed": 0,
             "enrich": None,
             "covers": None,
+            "incremental": None,
             "error": None,
         }
 
@@ -203,9 +214,12 @@ class ScrapeService:
             time.sleep(step)
             remaining -= step
 
-    def _download_page_covers(self, fetcher: Fetcher, page, site_domain: str = "") -> tuple[int, int]:
-        """为当前页缺少本地封面的条目下载封面，返回 (成功数, 失败数)。"""
-        ids = [item.gallery_id for item in page.items]
+    def _download_page_covers(self, fetcher: Fetcher, page, site_domain: str = "",
+                              new_ids: list[int] | None = None) -> tuple[int, int]:
+        """只为本次新增条目补封面，返回 (成功数, 失败数)。"""
+        ids = list(new_ids) if new_ids is not None else [item.gallery_id for item in page.items]
+        if not ids:
+            return 0, 0
         pending = db.ids_needing_cover(ids, self.db_path)
         if not pending:
             return 0, 0
@@ -232,9 +246,11 @@ class ScrapeService:
         return done, failed
 
     def _enrich_page(self, fetcher: Fetcher, page, site_domain: str = "",
-                     log_prefix: str = "") -> tuple[int, int, int]:
-        """为缺少详情的条目补全数据，返回 (处理数, 成功数, 失败数)。"""
-        ids = [item.gallery_id for item in page.items]
+                     log_prefix: str = "", new_ids: list[int] | None = None) -> tuple[int, int, int]:
+        """只为本次新增条目补详情，返回 (处理数, 成功数, 失败数)。"""
+        ids = list(new_ids) if new_ids is not None else [item.gallery_id for item in page.items]
+        if not ids:
+            return 0, 0, 0
         pending = db.ids_needing_detail(ids, self.db_path)
         if not pending:
             return 0, 0, 0
@@ -256,7 +272,8 @@ class ScrapeService:
         return len(pending), done, failed
 
     def _run(self, run_id: int, url: str, max_pages: int, delay: float,
-             enrich: bool = True, covers_on: bool = True, site_domain: str = "") -> None:
+             enrich: bool = True, covers_on: bool = True, site_domain: str = "",
+             incremental_on: bool = True) -> None:
         pages_done = 0
         pages_total = 0
         seen = new = dup = 0
@@ -264,6 +281,12 @@ class ScrapeService:
         covers_done = covers_failed = 0
         status = "done"
         error: str | None = None
+        # 增量抓取：只有该地址存在历史成功批次时才启用“遇到已收录即停”
+        stop_at_known: int | None = None
+        if incremental_on:
+            latest = db.latest_run_for_url(url, self.db_path)
+            if latest is not None:
+                stop_at_known = int(latest["run_id"] or 0)
         try:
             # 不要显式传 proxy：让 Fetcher 走 config.effective_proxy()，
             # 否则会绕过页面的「开启代理」开关
@@ -288,7 +311,7 @@ class ScrapeService:
                 dup += result["dup"]
                 self._log(
                     f"第 {page.page_no} 页入库：新增 {result['new']}，"
-                    f"重复 {result['dup']}（其中数据未变化 {result.get('unchanged', 0)}，保留原始记录）"
+                    f"已存在跳过 {result['dup']}（按规则不更新原始记录）"
                 )
                 self._progress(
                     pages_done=pages_done, pages_total=pages_total,
@@ -297,7 +320,8 @@ class ScrapeService:
                 if enrich:
                     batch_total, batch_done, batch_failed = self._enrich_page(
                         fetcher, page, site_domain=site_domain,
-                        log_prefix=f"第 {page.page_no} 页"
+                        log_prefix=f"第 {page.page_no} 页",
+                        new_ids=result.get("new_ids"),
                     )
                     details_total += batch_total
                     details_done += batch_done
@@ -309,10 +333,20 @@ class ScrapeService:
                     )
                 if covers_on:
                     batch_done, batch_failed = self._download_page_covers(
-                        fetcher, page, site_domain=site_domain)
+                        fetcher, page, site_domain=site_domain,
+                        new_ids=result.get("new_ids"))
                     covers_done += batch_done
                     covers_failed += batch_failed
                     self._progress(covers_done=covers_done, covers_failed=covers_failed)
+                # 增量抓取：同一列表地址已有成功批次时，遇到“本页出现已收录条目”即停止。
+                # 前提是上游列表按时间倒序返回，遇到旧条目后后续只会更旧，无需继续翻页。
+                if (incremental_on and stop_at_known is not None and page.page_no >= 1
+                        and result["dup"] > 0):
+                    self._log(
+                        f"第 {page.page_no} 页已出现已收录条目（重复 {result['dup']}，"
+                        f"新增 {result['new']}），增量抓取到此停止，后续旧数据不再请求"
+                    )
+                    break
             if self._cancel.is_set():
                 status = "cancelled"
                 self._log("抓取已取消（已抓取的数据已保存）")
@@ -355,5 +389,15 @@ class ScrapeService:
                     run_id, status=status, pages_total=pages_total, pages_done=pages_done,
                     items_seen=seen, items_new=new, items_dup=dup, error=error, path=self.db_path,
                 )
+                # 爬取结果为 0（没有新增任何条目）时，不保留这个批次号
+                if status == "done" and new == 0:
+                    db.delete_run(run_id, self.db_path)
+                    self._progress(run_id=None)
+                    self._log("本次抓取没有新增条目，批次号已删除（避免空批次占用）")
+                elif status == "done":
+                    # 同一 URL 只保留最新一次批次：旧批次并入本次批次
+                    merged = db.merge_runs_for_url(url, run_id, self.db_path)
+                    if merged:
+                        self._log(f"同一地址只保留最新批次：已清理并合并 {merged} 个旧批次")
             except Exception:
                 traceback.print_exc()

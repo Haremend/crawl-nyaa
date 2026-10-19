@@ -446,6 +446,8 @@ function cardHtml(item) {
     ? '<button class="want-btn active" data-want-ids="' + gid + '" title="取消待下载">★ 待下载</button>'
     : '<button class="want-btn" data-want-ids="' + gid + '" title="标记为待下载">☆ 待下载</button>';
   const dlBtn = '<button class="dl-btn" data-dl-id="' + gid + '" title="获取下载地址，用自己的网络下载">立即下载</button>';
+  const hideIds = (item.ids || [item.gallery_id]).join(",");
+  const hideBtn = '<button class="hide-btn" data-hide-ids="' + esc(hideIds) + '" title="逻辑删除：不展示、不下载；再次抓取到也会跳过">隐藏</button>';
   const doneBadge = item.downloaded ? '<span class="badge done">已下载</span>' : "";
   const uncensoredBadge = item.uncensored ? '<span class="badge uncensored">无码</span>' : "";
   const siteBadge = item.site_favorite ? '<span class="badge site">站点收藏</span>' : "";
@@ -487,7 +489,7 @@ function cardHtml(item) {
     + originalLine
     + '<div class="badges">' + uncensoredBadge + doneBadge + siteBadge + variantBadge + langBadges + "</div>"
     + '<div class="badges">' + tagBadges + more + "</div>"
-    + '<div class="card-actions">' + wantBtn + dlBtn + "</div>"
+    + '<div class="card-actions">' + wantBtn + dlBtn + hideBtn + "</div>"
     + variants
     + '<div class="card-meta"><span>#' + esc(item.gallery_id) + "</span><span>" + esc(factLine) + "</span></div>"
     + "</div></article>";
@@ -569,6 +571,33 @@ async function markDownloaded(ids, flag) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ids: ids, downloaded: flag }),
   });
+}
+
+async function setHidden(ids, flag) {
+  await api("/api/hidden", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids: ids, hidden: flag }),
+  });
+}
+
+async function syncFavoritesToWant() {
+  if (!state.key) { showGate(); return; }
+  if (!window.confirm("将站点账号收藏列表中的全部作品，在本地数据库标记为「待下载」？")) return;
+  $("favSyncBtn").disabled = true;
+  try {
+    const data = await api("/api/favorites/sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    toast("同步完成：共 " + (data.synced || 0) + " 条标记为待下载", "ok");
+    await reloadAll();
+  } catch (error) {
+    toast("同步失败：" + error.message, "error");
+  } finally {
+    $("favSyncBtn").disabled = false;
+  }
 }
 
 /** 构造本服务的文件转发地址（同源 + attachment，浏览器会直接保存）。 */
@@ -831,6 +860,7 @@ async function startScrape() {
         delay: Number($("delay").value || 1.2),
         enrich: $("enrichCheck").checked,
         covers: $("coverCheck").checked,
+        incremental: true,
       }),
     });
     toast("已开始抓取");
@@ -1005,6 +1035,7 @@ function bindEvents() {
     catch (error) { toast(error.message, "error"); }
   });
   $("favReloadBtn").addEventListener("click", () => loadFavorites(1).catch((e) => toast(e.message, "error")));
+  $("favSyncBtn").addEventListener("click", syncFavoritesToWant);
   $("favSearchInput").addEventListener("input", (event) => {
     const value = event.target.value;
     if (favSearchTimer) window.clearTimeout(favSearchTimer);
@@ -1073,6 +1104,20 @@ function bindEvents() {
       const was = markBtn.dataset.done === "1";
       try { await markDownloaded([id], !was); toast(was ? "已取消已下载标记" : "已标记已下载", "ok"); await reloadAll(); }
       catch (error) { toast(error.message, "error"); }
+    }
+    const hideBtn = event.target.closest("button.hide-btn");
+    if (hideBtn) {
+      const ids = String(hideBtn.dataset.hideIds || "").split(",")
+        .map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0);
+      if (!ids.length) return;
+      if (!window.confirm("确定隐藏该作品吗？隐藏后不再展示、不参与下载；再次抓取到也会跳过。")) return;
+      hideBtn.disabled = true;
+      try {
+        await setHidden(ids, true);
+        toast("已隐藏（逻辑删除）", "ok");
+        await reloadAll();
+      } catch (error) { toast(error.message, "error"); hideBtn.disabled = false; }
+      return;
     }
   });
 

@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS galleries (
     want_download     INTEGER NOT NULL DEFAULT 0,
     downloaded        INTEGER NOT NULL DEFAULT 0,
     downloaded_at     TEXT NOT NULL DEFAULT '',
+    hidden            INTEGER NOT NULL DEFAULT 0,
     site_favorite     INTEGER NOT NULL DEFAULT 0,
     from_scrape       INTEGER NOT NULL DEFAULT 1,
     batch_id          INTEGER NOT NULL DEFAULT 0,
@@ -114,6 +115,7 @@ MIGRATIONS = {
     "want_download": "ALTER TABLE galleries ADD COLUMN want_download INTEGER NOT NULL DEFAULT 0",
     "downloaded": "ALTER TABLE galleries ADD COLUMN downloaded INTEGER NOT NULL DEFAULT 0",
     "downloaded_at": "ALTER TABLE galleries ADD COLUMN downloaded_at TEXT NOT NULL DEFAULT ''",
+    "hidden": "ALTER TABLE galleries ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
     "site_favorite": "ALTER TABLE galleries ADD COLUMN site_favorite INTEGER NOT NULL DEFAULT 0",
     "from_scrape": "ALTER TABLE galleries ADD COLUMN from_scrape INTEGER NOT NULL DEFAULT 1",
     "batch_id": "ALTER TABLE galleries ADD COLUMN batch_id INTEGER NOT NULL DEFAULT 0",
@@ -286,6 +288,7 @@ def _params_from_row(gid: int, row: dict, source_url: str, now: str) -> dict:
         "want_download": 1 if (row.get("want_download") or 0) else 0,
         "downloaded": 1 if (row.get("downloaded") or 0) else 0,
         "downloaded_at": str(row.get("downloaded_at") or ""),
+        "hidden": 1 if (row.get("hidden") or 0) else 0,
         "site_favorite": 1 if (row.get("site_favorite") or 0) else 0,
         "from_scrape": 1 if (row.get("from_scrape", 1) or 0) else 0,
         "batch_id": _optional_int(row.get("batch_id")) or 0,
@@ -360,7 +363,7 @@ def content_differs(existing, params: dict) -> bool:
 
 def upsert_items(items: Iterable[Any], *, source_url: str = "", batch_id: int | None = None,
                  path: str | Path | None = None) -> dict:
-    """写入/更新作品条目，返回 {"seen":, "new":, "dup":}。"""
+    """写入作品条目；已存在的记录一律跳过、不覆盖，返回本次新增的 ID 列表。"""
     rows: dict[int, dict] = {}
     for item in items:
         row = _item_to_row(item)
@@ -370,7 +373,7 @@ def upsert_items(items: Iterable[Any], *, source_url: str = "", batch_id: int | 
         rows[gid] = row
 
     if not rows:
-        return {"seen": 0, "new": 0, "dup": 0}
+        return {"seen": 0, "new": 0, "dup": 0, "new_ids": []}
 
     now = utc_now()
     with _WRITE_LOCK:
@@ -383,27 +386,35 @@ def upsert_items(items: Iterable[Any], *, source_url: str = "", batch_id: int | 
                     f"SELECT * FROM galleries WHERE gallery_id IN ({marks})", chunk
                 ):
                     existing_rows[int(record["gallery_id"])] = record
-            unchanged = 0
+            unchanged = 0   # 已存在且内容一致（同样跳过、不覆盖）
+            skipped = 0     # 已存在但本次字段有变化：仍然跳过，不更新库中记录
+            new_ids: list[int] = []
             for gid, row in rows.items():
                 params = _params_from_row(gid, row, source_url, now)
                 if batch_id:                       # 本次抓取的批次号
                     params["batch_id"] = int(batch_id)
                 stored = existing_rows.get(gid)
-                if stored is not None and not content_differs(stored, params):
-                    # 数据完全相同：保留原始记录（含最早的批次号），只刷新「最近见到」
-                    unchanged += 1
+                if stored is not None:
+                    # 需求：库中已存在的作品，无论从哪个 URL 再抓到，都直接跳过、
+                    # 不更新任何内容字段；保留最早的记录、批次号与来源，
+                    # 仅刷新「最近见到」时间（last_seen）作为追踪信息。
+                    if content_differs(stored, params):
+                        skipped += 1
+                    else:
+                        unchanged += 1
                     conn.execute("UPDATE galleries SET last_seen = ? WHERE gallery_id = ?",
                                  (now, gid))
                     continue
                 conn.execute(UPSERT_SQL, params)
+                new_ids.append(gid)
             conn.commit()
         finally:
             conn.close()
 
-    new_count = sum(1 for gid in rows if gid not in existing_rows)
-    updated = len(rows) - new_count - unchanged
+    new_count = len(new_ids)
     return {"seen": len(rows), "new": new_count, "dup": len(rows) - new_count,
-            "unchanged": unchanged, "updated": updated}
+            "unchanged": unchanged, "skipped": skipped, "updated": 0,
+            "new_ids": new_ids}
 
 
 def ids_needing_cover(ids: Sequence[int], path: str | Path | None = None) -> list[int]:
@@ -553,12 +564,12 @@ def _row_list(row: sqlite3.Row, key: str) -> list:
 
 
 def _fetch_rows(q: str | None = None, path: str | Path | None = None) -> list[sqlite3.Row]:
-    sql = "SELECT * FROM galleries"
+    sql = "SELECT * FROM galleries WHERE hidden = 0"
     params: list = []
     if q:
         like = f"%{q}%"
-        sql += (" WHERE title LIKE ? OR title_original LIKE ? OR tags LIKE ? OR artists LIKE ? "
-                "OR groups LIKE ? OR parodies LIKE ? OR characters LIKE ?")
+        sql += (" AND (title LIKE ? OR title_original LIKE ? OR tags LIKE ? OR artists LIKE ? "
+                 "OR groups LIKE ? OR parodies LIKE ? OR characters LIKE ?)")
         params = [like] * 7
     sql += " ORDER BY gallery_id DESC"
     conn = connect(path)
@@ -772,6 +783,7 @@ def _serialize_group(group: Sequence[sqlite3.Row], preferred: Sequence[str]) -> 
         "want_download": any(bool(row["want_download"]) for row in ordered),
         "downloaded": any(bool(row["downloaded"]) for row in ordered),
         "downloaded_at": _first_value(ordered, "downloaded_at"),
+        "hidden": any(bool(row["hidden"]) for row in ordered),
         "site_favorite": any(bool(row["site_favorite"]) for row in ordered),
         "batch_id": int(main["batch_id"] or 0),
         "cover_file": _first_value(ordered, "cover_file"),
@@ -922,7 +934,7 @@ def list_batch_targets(batch_id: int, path: str | Path | None = None,
         return []
     conn = connect(path)
     try:
-        rows = list(conn.execute("SELECT * FROM galleries WHERE batch_id = ?", (batch,)))
+        rows = list(conn.execute("SELECT * FROM galleries WHERE batch_id = ? AND hidden = 0", (batch,)))
     finally:
         conn.close()
     if not rows:
@@ -953,7 +965,7 @@ def list_want_download_targets(path: str | Path | None = None,
     """
     conn = connect(path)
     try:
-        rows = list(conn.execute("SELECT * FROM galleries"))
+        rows = list(conn.execute("SELECT * FROM galleries WHERE hidden = 0"))
     finally:
         conn.close()
     if not rows:
@@ -993,6 +1005,54 @@ def set_downloaded(gallery_ids: Sequence[int], downloaded: bool,
                     f"UPDATE galleries SET downloaded = ?, downloaded_at = ? "
                     f"WHERE gallery_id IN ({marks})",
                     [1 if downloaded else 0, now] + list(chunk),
+                )
+                updated += cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+            conn.commit()
+        finally:
+            conn.close()
+    return updated
+
+
+def set_hidden(gallery_ids: Sequence[int], hidden: bool, path: str | Path | None = None) -> int:
+    """逻辑删除：标记隐藏的作品不展示、不下载（爬取到已存在的照样跳过）。"""
+    ids = [_optional_int(gid) or 0 for gid in gallery_ids if _optional_int(gid) or 0]
+    if not ids:
+        return 0
+    value = 1 if hidden else 0
+    updated = 0
+    with _WRITE_LOCK:
+        conn = connect(path)
+        try:
+            for chunk in _chunks(ids, 400):
+                marks = ",".join("?" for _ in chunk)
+                cursor = conn.execute(
+                    f"UPDATE galleries SET hidden = ? WHERE gallery_id IN ({marks})",
+                    [value] + list(chunk),
+                )
+                updated += cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+            conn.commit()
+        finally:
+            conn.close()
+    return updated
+
+
+
+def set_site_favorite(gallery_ids: Sequence[int], favorite: bool,
+                      path: str | Path | None = None) -> int:
+    """批量设置「站点收藏」标记（用于收藏同步/收藏页本地过滤）。"""
+    ids = [gid for gid in (_optional_int(value) or 0 for value in gallery_ids) if gid > 0]
+    if not ids:
+        return 0
+    value = 1 if favorite else 0
+    updated = 0
+    with _WRITE_LOCK:
+        conn = connect(path)
+        try:
+            for chunk in _chunks(ids, 400):
+                marks = ",".join("?" for _ in chunk)
+                cursor = conn.execute(
+                    f"UPDATE galleries SET site_favorite = ? WHERE gallery_id IN ({marks})",
+                    [value] + list(chunk),
                 )
                 updated += cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
             conn.commit()
@@ -1255,8 +1315,15 @@ def stats(path: str | Path | None = None) -> dict:
     want = sum(1 for row in rows if (row["want_download"] or 0))
     done = sum(1 for row in rows if (row["downloaded"] or 0))
     site_fav = sum(1 for row in rows if (row["site_favorite"] or 0))
+    conn = connect(path)
+    try:
+        hidden_count = int(conn.execute(
+            "SELECT COUNT(*) FROM galleries WHERE hidden = 1").fetchone()[0])
+    finally:
+        conn.close()
     return {
         "entries": len(rows),
+        "hidden": hidden_count,
         "works": works,
         "duplicates": max(0, len(rows) - works),
         "details": details,
@@ -1313,6 +1380,66 @@ def last_run(path: str | Path | None = None) -> dict | None:
     try:
         row = conn.execute("SELECT * FROM scrape_runs ORDER BY run_id DESC LIMIT 1").fetchone()
         return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+
+
+def latest_run_for_url(url: str, path: str | Path | None = None) -> dict | None:
+    """返回该列表地址最近一次成功抓取的批次记录（用于增量抓取判断）。"""
+    conn = connect(path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM scrape_runs WHERE url = ? AND status = 'done' "
+            "ORDER BY run_id DESC LIMIT 1",
+            (str(url),),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def delete_run(run_id: int, path: str | Path | None = None) -> bool:
+    """删除一次爬取记录（用于「爬取结果为 0 时不保留该批次号」）。"""
+    conn = connect(path)
+    try:
+        with _WRITE_LOCK:
+            cursor = conn.execute("DELETE FROM scrape_runs WHERE run_id = ?", (int(run_id),))
+            conn.commit()
+            return bool(cursor.rowcount)
+    finally:
+        conn.close()
+
+
+def merge_runs_for_url(url: str, keep_run_id: int,
+                       path: str | Path | None = None) -> int:
+    """同一 URL 只保留最新一次批次。
+
+    删除该 URL 的其它批次记录，并把旧批次的条目归属改到最新批次，
+    便于「保存本批全部数据」拿到该地址的最新完整清单。返回清理的旧批次数量。
+    """
+    keep = int(keep_run_id or 0)
+    if keep <= 0:
+        return 0
+    conn = connect(path)
+    try:
+        with _WRITE_LOCK:
+            old_ids = [int(row[0]) for row in conn.execute(
+                "SELECT run_id FROM scrape_runs WHERE url = ? AND run_id <> ?",
+                (str(url), keep),
+            )]
+            if not old_ids:
+                return 0
+            for chunk in _chunks(old_ids, 400):
+                marks = ",".join("?" for _ in chunk)
+                conn.execute(
+                    f"UPDATE galleries SET batch_id = ? WHERE batch_id IN ({marks})",
+                    [keep] + list(chunk),
+                )
+                conn.execute(f"DELETE FROM scrape_runs WHERE run_id IN ({marks})", list(chunk))
+            conn.commit()
+            return len(old_ids)
     finally:
         conn.close()
 

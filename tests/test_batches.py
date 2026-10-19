@@ -54,15 +54,39 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(data["items"][0]["last_seen"][:10],
                          db.query_works(path=self.db_path, per_page=50)["items"][0]["last_seen"][:10])
 
-    def test_changed_data_updates_record(self):
+    def test_changed_data_keeps_original_record(self):
+        """已存在记录即使本次抓到的字段不同，也一律跳过、不覆盖原记录。"""
         db.upsert_items([item(1, title="Old")], source_url="https://example.net/group/a/",
                         batch_id=7, path=self.db_path)
-        result = db.upsert_items([item(1, title="New")], source_url="https://example.net/group/a/",
+        result = db.upsert_items([item(1, title="New")], source_url="https://example.net/group/b/",
                                  batch_id=8, path=self.db_path)
+        self.assertEqual(result["new"], 0)
         self.assertEqual(result["unchanged"], 0)
+        self.assertEqual(result["skipped"], 1, "字段有变化也应计为已存在跳过")
+        self.assertEqual(result["updated"], 0, "原始记录不应被更新")
         data = db.query_works(path=self.db_path, per_page=50)
-        self.assertEqual(data["items"][0]["title"], "New")
-        self.assertEqual(data["items"][0]["batch_id"], 8, "数据变化时批次号更新为最新")
+        self.assertEqual(data["items"][0]["title"], "Old", "应保留第一次入库的标题")
+        self.assertEqual(data["items"][0]["batch_id"], 7, "应保留第一次入库的批次号")
+
+    def test_merge_runs_keeps_latest_and_reassigns_old_items(self):
+        """同一 URL 只保留最新批次，旧批次条目并入最新批次。"""
+        url = "https://example.net/group/a/"
+        old_run = db.create_run(url, self.db_path)
+        db.upsert_items([item(1)], source_url=url, batch_id=old_run, path=self.db_path)
+        db.finish_run(old_run, status="done", items_new=1, items_seen=1, path=self.db_path)
+
+        new_run = db.create_run(url, self.db_path)
+        db.upsert_items([item(2)], source_url=url, batch_id=new_run, path=self.db_path)
+        db.finish_run(new_run, status="done", items_new=1, items_seen=1, path=self.db_path)
+
+        merged = db.merge_runs_for_url(url, new_run, self.db_path)
+        self.assertEqual(merged, 1)
+        runs = db.list_batches(self.db_path)
+        self.assertEqual([run["run_id"] for run in runs], [new_run], "同 URL 只应保留最新批次")
+        data = db.query_works(path=self.db_path, per_page=50, batch_id=new_run,
+                              dedupe_title=False)
+        self.assertEqual({row["gallery_id"] for row in data["items"]}, {1, 2},
+                         "旧批次条目应归属到最新批次")
 
     def test_richer_record_not_overwritten_by_listing(self):
         """已有详情数据的记录，被后续仅有列表数据的抓取命中时不应判为变化。"""

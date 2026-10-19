@@ -79,6 +79,8 @@ COVER_DELAY = float(os.environ.get("CLAW_COVER_DELAY", "0.25"))
 COVER_DEFAULT = os.environ.get("CLAW_COVERS", "1").lower() not in ("0", "false", "no")
 ENRICH_DEFAULT = os.environ.get("CLAW_ENRICH", "1").lower() not in ("0", "false", "no")
 MAX_PAGES = int(os.environ.get("CLAW_MAX_PAGES", "200"))
+# 增量抓取默认开关：同一列表地址再次抓取时，只抓新增条目（遇到已收录条目即停）
+INCREMENTAL = os.environ.get("CLAW_INCREMENTAL", "1").lower() not in ("0", "false", "no")
 # 列表页满页条目数（明显少于该值时通常说明已到末页）
 PAGE_SIZE_HINT = int(os.environ.get("CLAW_PAGE_SIZE_HINT", "20"))
 # 若本地代理对 https 站点做 MITM 导致证书报错，可设置 CLAW_INSECURE_TLS=1 关闭校验

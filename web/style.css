@@ -265,16 +265,18 @@ img.thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
 
 /* ================= 卡片按钮 ================= */
 .card-actions { display: flex; gap: 8px; margin-top: 2px; }
-.want-btn, .dl-btn {
+.want-btn, .dl-btn, .hide-btn {
   flex: 1; padding: 8px 10px; border-radius: 8px; font-size: 14px; font-family: inherit;
   cursor: pointer; border: 1px solid var(--border-strong); background: #fff; color: var(--text);
   transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
-.want-btn:hover, .dl-btn:hover { border-color: var(--accent); color: var(--accent); }
+.want-btn:hover, .dl-btn:hover, .hide-btn:hover { border-color: var(--accent); color: var(--accent); }
 .want-btn.active { background: #fff6e6; border-color: #e8b44a; color: #9a6a00; font-weight: 700; }
 .dl-btn { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
 .dl-btn:hover { background: #bd2b60; border-color: #bd2b60; color: #fff; }
-.want-btn:disabled, .dl-btn:disabled { opacity: 0.55; cursor: wait; }
+.want-btn:disabled, .dl-btn:disabled, .hide-btn:disabled { opacity: 0.55; cursor: wait; }
+.hide-btn { background: #f5f7fa; border-color: var(--border-strong); color: #5b6570; }
+.hide-btn:hover { border-color: #d93025; color: #d93025; }
 
 .badge.done { border-color: #9fd8b8; color: #146c40; background: #f3fbf6; font-weight: 600; }
 .badge.site { border-color: #c5b6f5; color: #5f43c9; background: #f5f2ff; }
