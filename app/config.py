@@ -31,6 +31,9 @@ DOWNLOAD_DELAY = float(os.environ.get("CLAW_DOWNLOAD_DELAY", "1.0"))
 #            重复下载不再请求上游，适合磁盘充足的 VPS
 #   stream = 64KB 流式转发，不占服务器磁盘，适合磁盘紧张的 VPS
 DOWNLOAD_MODE = (os.environ.get("CLAW_DOWNLOAD_MODE", "stream") or "stream").strip().lower()
+
+# 服务端下载队列的并发任务数（默认 5）
+DOWNLOAD_CONCURRENCY = max(1, int(os.environ.get("CLAW_DOWNLOAD_CONCURRENCY", "5") or 5))
 if DOWNLOAD_MODE not in ("cache", "stream"):
     DOWNLOAD_MODE = "stream"
 WEB_DIR = BASE_DIR / "web"

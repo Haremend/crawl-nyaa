@@ -90,7 +90,17 @@
 | `cache` | 先下载到 `download/`，再读盘转发 | **必须先查缓存再请求上游签名**，否则「重复下载不请求上游」就失效；先写 `.part` 再原子改名；并发用 `_cache_lock()` |
 | `stream` | 64KB 边读边转发，不落盘 | 不写磁盘；`Content-Length` 缺失时靠关闭连接告知结束 |
 
-### 1.9 上游接口的 Key 使用规则
+### 1.9 下载统一走服务端队列
+
+- 所有下载都通过 `app/download_queue.py` 的 `DownloadQueue`：任务写进 `download_jobs` 表，
+  N 个 worker 并发消费（N = `CLAW_DOWNLOAD_CONCURRENCY`，默认 5）
+- 队列在数据库里 → 任何标签页看到的是同一份；**不要把进度只放在某个请求的内存里**
+- 进度写库有节流（`PROGRESS_INTERVAL`），避免每个 64KB chunk 都写一次 SQLite
+- **API Key 只在队列进程的内存里**（`_keys`），不写数据库；服务重启后未完成任务会失败，需重新入队
+- 入队用 `create_job()`：同一作品 + 同一格式的排队/运行中任务会自动去重
+- 批次来源的任务（`source="batch"`）落到 `download/batch_<id>/` 并写 `manifest.json` / `works.csv`
+
+### 1.10 上游接口的 Key 使用规则
 
 用户明确要求：**上游接口不需要 Key 的就不要带 Key。**
 

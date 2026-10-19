@@ -572,6 +572,7 @@ async function markDownloaded(ids, flag) {
 }
 
 /** 构造本服务的文件转发地址（同源 + attachment，浏览器会直接保存）。 */
+/* 说明：立即下载已改为「先入队，下载完成后自动保存」，此函数用于完成后的取文件。 */
 function redownloadEnabled() {
   const box = $("redownloadCheck");
   return Boolean(box && box.checked);
@@ -587,154 +588,78 @@ function downloadFileUrl(galleryId, format) {
   return "/api/download/file?" + params.toString();
 }
 
-/** 立即下载：由后端取签名并转发文件，浏览器直接保存到本地。 */
-async function downloadNow(galleryId, button) {
-  const fmt = $("formatSelect").value || "zip";
-  const original = button.textContent;
-  button.disabled = true;
-  button.textContent = "获取中…";
-  try {
-    if (!state.key) throw new Error("请先填写 API Key");
-    // 同源地址 + 服务端 attachment 头 → 浏览器直接保存，不会跳转页面
-    const link = document.createElement("a");
-    link.href = downloadFileUrl(galleryId, fmt);
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    toast("已开始下载（保存到你的电脑）");
-  } catch (error) {
-    toast("下载失败：" + error.message, "error");
-  } finally {
-    button.disabled = false;
-    button.textContent = original;
-  }
+/** 队列轮询：所有页面的进度都来自同一份服务端队列。 */
+function fmtBytes(value) {
+  const n = Number(value) || 0;
+  if (n >= 1073741824) return (n / 1073741824).toFixed(2) + " GB";
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+  if (n >= 1024) return (n / 1024).toFixed(0) + " KB";
+  return n + " B";
 }
 
-/** 保存全部：把当前批次的全部作品保存到 download/batch_<批次号>/ */
-async function saveCurrentBatch() {
-  if (!state.batchId) {
-    toast("请先在顶部选择一个批次", "error");
-    return;
-  }
-  if (state.saveMode === "local") {
-    $("saveBatchBtn").disabled = true;
-    $("downloadCancelBtn").disabled = false;
-    await localLoop("batch", Number(state.batchId));
-    return;
-  }
-  const fmt = $("formatSelect").value || "zip";
-  $("saveBatchBtn").disabled = true;
-  $("dlProgressPanel").hidden = false;
-  try {
-    await api("/api/batch/save", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        batch_id: Number(state.batchId), format: fmt, redownload: redownloadEnabled(),
-      }),
-    });
-    toast("已开始保存批次 #" + state.batchId + " 的全部数据");
-    startDownloadPolling();
-  } catch (error) {
-    $("saveBatchBtn").disabled = false;
-    toast(error.message, "error");
-  }
+function jobRowHtml(job) {
+  const status = job.status || "queued";
+  const total = Number(job.total_bytes) || 0;
+  const done = Number(job.done_bytes) || 0;
+  const pct = status === "done" ? 100
+    : (total > 0 ? Math.min(99, Math.round((done / total) * 100)) : 0);
+  const statusText = { queued: "排队中", running: "下载中", done: "完成", failed: "失败", cancelled: "已取消" }[status] || status;
+  const sizeText = total > 0 ? (fmtBytes(done) + " / " + fmtBytes(total)) : fmtBytes(done);
+  const cancelBtn = (status === "queued" || status === "running")
+    ? '<button class="btn ghost q-cancel" data-cancel-job="' + job.job_id + '">取消</button>' : "";
+  const title = esc(job.title || ("#" + job.gallery_id));
+  const error = job.error ? ' · <span style="color:#d93025">' + esc(job.error.slice(0, 60)) + "</span>" : "";
+  return '<div class="queue-item ' + esc(status) + '">'
+    + '<div class="q-name"><span class="q-title">' + title + "</span>"
+    + '<span class="q-sub">#' + esc(job.gallery_id) + " · " + esc(statusText) + " · " + esc(sizeText) + error + "</span></div>"
+    + '<div class="q-bar"><span style="width:' + pct + '%"></span></div>'
+    + '<div class="q-pct">' + pct + "%</div>" + cancelBtn + "</div>";
 }
 
-/** 浏览器端循环下载：逐条取下载地址并触发保存到用户电脑。 */
-async function localLoop(mode, batchId) {
-  if (state.localRunning) { toast("本地下载进行中", "error"); return; }
-  state.localRunning = true;
-  state.localCancel = false;
+function renderQueue(queue) {
+  if (!queue) return;
   $("dlProgressPanel").hidden = false;
-  const fmt = $("formatSelect").value || "zip";
+  const counts = queue.counts || {};
+  $("dlProgressText").textContent = "并发 " + (queue.workers || 0)
+    + " · 排队 " + (counts.queued || 0)
+    + " · 下载中 " + (counts.running || 0)
+    + " · 完成 " + (counts.done || 0)
+    + (counts.failed ? " · 失败 " + counts.failed : "");
+  const jobs = (queue.jobs || []).filter((job) =>
+    ["running", "queued", "failed"].includes(job.status)).slice(0, 40);
+  const finished = (queue.jobs || []).filter((job) => job.status === "done").slice(0, 3);
+  const rows = jobs.concat(finished);
+  $("queueList").innerHTML = rows.length
+    ? rows.map(jobRowHtml).join("")
+    : '<div class="queue-empty">队列为空</div>';
 
-  try {
-    const params = new URLSearchParams({ mode: mode });
-    if (mode === "batch") params.set("batch_id", String(batchId));
-    if (redownloadEnabled()) params.set("redownload", "1");
-    const plan = await api("/api/download/targets?" + params.toString(), { loadingText: "准备下载清单…" });
-    const items = plan.items || [];
-    if (!items.length) throw new Error(mode === "batch" ? "该批次没有可下载的作品" : "没有标记为「待下载」的作品");
-
-    const total = items.length;
-    let done = 0, failed = 0;
-    for (let index = 0; index < total; index += 1) {
-      if (state.localCancel) break;
-      const target = items[index];
-      const gid = target.gallery_id;
-      const bar = $("dlProgressBar");
-      bar.classList.remove("indeterminate");
-      bar.style.width = Math.round((index / total) * 100) + "%";
-      $("dlProgressText").innerHTML = "本地保存中：" + (index + 1) + "/" + total
-        + " · 成功 " + done + (failed ? " · 失败 " + failed : "")
-        + " · 当前 #" + esc(gid) + " " + esc(String(target.title || "").slice(0, 30));
-      $("dlLogBox").textContent = (state.localLogs || []).slice(-10).join("\n");
-
-      try {
-        const link = document.createElement("a");
-        link.href = downloadFileUrl(gid, fmt);
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        done += 1;
-        // 地址已交给浏览器，标记为已下载（尽力而为）
-        try { await markDownloaded([gid], true); } catch (error) { /* 忽略 */ }
-        state.localLogs = (state.localLogs || []).concat(
-          "[" + new Date().toLocaleTimeString("zh-CN", { hour12: false }) + "] #" + gid + " 已交给浏览器下载");
-      } catch (error) {
-        failed += 1;
-        state.localLogs = (state.localLogs || []).concat("#" + gid + " 失败：" + error.message);
-      }
-      // 浏览器对连续下载有限制，逐条之间留间隔
-      if (index < total - 1 && !state.localCancel) await sleep(1500);
+  // 立即下载：任务完成后自动把文件存到用户电脑
+  for (const job of queue.jobs || []) {
+    const pending = state.pendingDeliveries.get(String(job.job_id));
+    if (job.status === "done" && pending) {
+      state.pendingDeliveries.delete(String(job.job_id));
+      queueDelivery(pending);
+    } else if (["failed", "cancelled"].includes(job.status) && pending) {
+      state.pendingDeliveries.delete(String(job.job_id));
+      toast("下载失败：" + esc(job.error || "任务未完成"), "error");
     }
-
-    const bar = $("dlProgressBar");
-    bar.style.width = "100%";
-    $("dlProgressText").innerHTML = (state.localCancel ? "本地保存已停止" : "本地保存完成")
-      + " · 成功 " + done + " / " + total + (failed ? " · 失败 " + failed : "");
-    $("dlLogBox").textContent = (state.localLogs || []).slice(-12).join("\n");
-    toast((state.localCancel ? "已停止" : "本地保存完成") + "：成功 " + done + "，失败 " + failed, failed ? "error" : "ok");
-    await reloadAll();
-  } catch (error) {
-    toast(error.message, "error");
-  } finally {
-    state.localRunning = false;
-    $("downloadAllBtn").disabled = false;
-    $("saveBatchBtn").disabled = false;
-    $("downloadCancelBtn").disabled = true;
   }
 }
 
-function sleep(ms) { return new Promise((resolve) => window.setTimeout(resolve, ms)); }
-
-async function startDownloadAll() {
-  if (state.saveMode === "local") {
-    $("downloadAllBtn").disabled = true;
-    $("downloadCancelBtn").disabled = false;
-    await localLoop("want", 0);
-    return;
-  }
-  const fmt = $("formatSelect").value || "zip";
-  $("downloadAllBtn").disabled = true;
-  $("dlProgressPanel").hidden = false;
-  try {
-    await api("/api/download/start", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ format: fmt, redownload: redownloadEnabled() }),
-    });
-    toast(redownloadEnabled() ? "已开始重新下载（按文件名跳过已存在文件）" : "已开始批量下载");
-    startDownloadPolling();
-  } catch (error) {
-    $("downloadAllBtn").disabled = false;
-    toast(error.message, "error");
-  }
+function triggerBrowserDownload(galleryId) {
+  const link = document.createElement("a");
+  link.href = "/api/download/file?gallery_id=" + encodeURIComponent(galleryId)
+    + "&format=" + encodeURIComponent($("formatSelect").value || "zip")
+    + "&apikey=" + encodeURIComponent(state.key || "");
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  toast("已从服务器保存到你的电脑");
 }
 
 function startDownloadPolling() {
   stopDownloadPolling();
+  $("dlProgressPanel").hidden = false;
   state.dlPolling = window.setInterval(pollDownload, 1000);
   pollDownload();
 }
@@ -744,35 +669,146 @@ function stopDownloadPolling() {
 }
 
 async function pollDownload() {
-  let status;
+  let queue;
   try {
-    status = await api("/api/download/status", { silent: true });
+    queue = await api("/api/download/jobs?limit=60", { silent: true });
   } catch (error) {
     stopDownloadPolling();
-    $("downloadAllBtn").disabled = false;
     return;
   }
-  const total = status.total || 0;
-  const done = status.done || 0;
-  const failed = status.failed || 0;
-  const bar = $("dlProgressBar");
-  bar.classList.toggle("indeterminate", Boolean(status.running) && !total);
-  bar.style.width = total ? Math.min(100, Math.round(((done + failed) / total) * 100)) + "%" : (status.running ? "35%" : "0%");
-  const map = { idle: "空闲", running: "下载中", done: "已完成", cancelled: "已取消", error: "失败" };
-  $("dlProgressText").innerHTML = "状态：<b>" + esc(map[status.status] || status.status) + "</b>"
-    + (status.out_dir ? " · 输出 <code>" + esc(status.out_dir) + "</code>" : "") + " · 成功 "
-    + done + "/" + total + (failed ? " · 失败 " + failed : "")
-    + (status.current ? " · 当前 " + esc(status.current) : "")
-    + (status.error ? " · " + esc(status.error) : "");
-  $("dlLogBox").textContent = (status.logs || []).slice(-12).join("\n");
-  renderDownloadSummary(status);
-  $("downloadAllBtn").disabled = Boolean(status.running);
-  $("saveBatchBtn").disabled = Boolean(status.running);
-  $("downloadCancelBtn").disabled = !status.running;
-  if (!status.running && status.status !== "running" && status.status !== "idle") {
+  renderQueue(queue);
+  const counts = queue.counts || {};
+  const active = (counts.queued || 0) + (counts.running || 0);
+  $("downloadAllBtn").disabled = false;
+  $("saveBatchBtn").disabled = false;
+  $("queueCancelAllBtn").disabled = active === 0;
+  if (state.queueWasActive && active === 0) {
     stopDownloadPolling();
-    toast("批量下载结束：成功 " + done + "，失败 " + failed, failed ? "error" : "ok");
+    toast("下载队列已清空：完成 " + (counts.done || 0) + "，失败 " + (counts.failed || 0),
+          counts.failed ? "error" : "ok");
     await reloadAll();
+  }
+  state.queueWasActive = active > 0;
+}
+
+/** 立即下载：加入服务端队列；完成后自动从服务器保存到用户电脑。 */
+async function downloadNow(galleryId, button) {
+  const fmt = $("formatSelect").value || "zip";
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = "入队中…";
+  try {
+    const data = await api("/api/download/enqueue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ gallery_id: galleryId, format: fmt }),
+    });
+    const jobId = data.job && data.job.job_id;
+    if (jobId) state.pendingDeliveries.set(String(jobId), galleryId);
+    toast("已加入下载队列，完成后会自动保存到你的电脑");
+    startDownloadPolling();
+  } catch (error) {
+    toast("加入队列失败：" + error.message, "error");
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+/** 逐个投递（间隔 800ms），避免浏览器同时弹多个保存框。 */
+function queueDelivery(galleryId) {
+  state.deliveryQueue = state.deliveryQueue || [];
+  state.deliveryQueue.push(galleryId);
+  if (state.deliveryTimer) return;
+  const pump = () => {
+    const next = (state.deliveryQueue || []).shift();
+    if (!next) { state.deliveryTimer = null; return; }
+    triggerBrowserDownload(next);
+    state.deliveryTimer = window.setTimeout(pump, 800);
+  };
+  state.deliveryTimer = window.setTimeout(pump, 100);
+}
+
+/** 服务端保存：把「待下载」或整批任务全部入队（队列负责并发与进度）。 */
+async function startDownloadAll() {
+  if (state.saveMode === "local") { return localLoop("want", 0); }
+  const fmt = $("formatSelect").value || "zip";
+  $("downloadAllBtn").disabled = true;
+  $("dlProgressPanel").hidden = false;
+  try {
+    const data = await api("/api/download/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ format: fmt, redownload: redownloadEnabled() }),
+    });
+    toast("已加入队列 " + (data.queued || 0) + " 个任务");
+    startDownloadPolling();
+  } catch (error) {
+    $("downloadAllBtn").disabled = false;
+    toast(error.message, "error");
+  }
+}
+
+/** 保存全部：把当前批次的全部作品入队。 */
+async function saveCurrentBatch() {
+  if (!state.batchId) { toast("请先在顶部选择一个批次", "error"); return; }
+  if (state.saveMode === "local") { return localLoop("batch", Number(state.batchId)); }
+  const fmt = $("formatSelect").value || "zip";
+  $("saveBatchBtn").disabled = true;
+  $("dlProgressPanel").hidden = false;
+  try {
+    const data = await api("/api/batch/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        batch_id: Number(state.batchId), format: fmt, redownload: redownloadEnabled(),
+      }),
+    });
+    toast("已加入队列 " + (data.queued || 0) + " 个任务");
+    startDownloadPolling();
+  } catch (error) {
+    $("saveBatchBtn").disabled = false;
+    toast(error.message, "error");
+  }
+}
+
+/** 本地保存：目标先入队；队列下载完成后逐个自动保存到用户电脑。 */
+async function localLoop(mode, batchId) {
+  if (state.localRunning) { toast("已有批量任务在进行", "error"); return; }
+  state.localRunning = true;
+  state.localCancel = false;
+  $("dlProgressPanel").hidden = false;
+  const fmt = $("formatSelect").value || "zip";
+  try {
+    const params = new URLSearchParams({ mode: mode });
+    if (mode === "batch") params.set("batch_id", String(batchId));
+    if (redownloadEnabled()) params.set("redownload", "1");
+    const plan = await api("/api/download/targets?" + params.toString(),
+                           { loadingText: "准备下载清单…" });
+    const items = plan.items || [];
+    if (!items.length) {
+      throw new Error(mode === "batch" ? "该批次没有可下载的作品" : "没有标记为「待下载」的作品");
+    }
+    let queued = 0;
+    for (const target of items) {
+      if (state.localCancel) break;
+      const data = await api("/api/download/enqueue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ gallery_id: target.gallery_id, format: fmt }),
+      });
+      const jobId = data.job && data.job.job_id;
+      if (jobId) {
+        state.pendingDeliveries.set(String(jobId), target.gallery_id);
+        queued += 1;
+      }
+    }
+    toast("已加入队列 " + queued + " 个任务，完成后会依次保存到你的电脑");
+    startDownloadPolling();
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    state.localRunning = false;
   }
 }
 
@@ -935,6 +971,29 @@ function bindEvents() {
     });
   });
   $("saveBatchBtn").addEventListener("click", saveCurrentBatch);
+  $("queueCancelAllBtn").addEventListener("click", async () => {
+    try {
+      await api("/api/download/jobs/cancel", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ all: true }),
+      });
+      toast("已取消排队中的任务");
+      pollDownload();
+    } catch (error) { toast(error.message, "error"); }
+  });
+
+  $("queueList").addEventListener("click", async (event) => {
+    const btn = event.target.closest("button[data-cancel-job]");
+    if (!btn) return;
+    try {
+      await api("/api/download/jobs/cancel", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: Number(btn.dataset.cancelJob) }),
+      });
+      pollDownload();
+    } catch (error) { toast(error.message, "error"); }
+  });
+
   $("downloadAllBtn").addEventListener("click", startDownloadAll);
   $("downloadCancelBtn").addEventListener("click", async () => {
     if (state.localRunning) {

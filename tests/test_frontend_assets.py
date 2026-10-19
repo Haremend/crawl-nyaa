@@ -77,7 +77,7 @@ class ScriptGuardTests(unittest.TestCase):
     def test_polling_requests_are_silent(self):
         """轮询接口不能弹遮罩，否则每秒闪一次。"""
         self.assertIn('api("/api/scrape/status", { silent: true })', self.js)
-        self.assertIn('api("/api/download/status", { silent: true })', self.js)
+        self.assertIn('api("/api/download/jobs?limit=60", { silent: true })', self.js)
 
     def test_gate_does_not_validate_on_submit(self):
         """门禁提交时不得发起校验请求。
@@ -109,6 +109,15 @@ class ScriptGuardTests(unittest.TestCase):
         self.assertIn('id="redownloadCheck"', html, "应有「重新下载」开关")
         self.assertIn("redownloadEnabled()", self.js)
         self.assertIn("redownload:", self.js, "请求里应带上 redownload")
+
+    def test_download_queue_wired(self):
+        """下载必须走服务端队列：入队 + 轮询队列状态。"""
+        self.assertIn("/api/download/enqueue", self.js, "应立即下载应入队")
+        self.assertIn("/api/download/jobs", self.js, "应轮询队列状态")
+        self.assertIn("/api/download/jobs/cancel", self.js, "应支持取消任务")
+        html = HTML.read_text(encoding="utf-8")
+        self.assertIn('id="queueList"', html, "应有队列列表容器")
+        self.assertIn('id="queueCancelAllBtn"', html, "应有取消排队按钮")
 
     def test_no_credential_leak_in_assets(self):
         """前端资源里不应出现凭据相关的字样。

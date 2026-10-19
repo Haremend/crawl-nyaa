@@ -149,10 +149,13 @@
       逐个调用下载接口，保存到项目 <code id="dlDirHint">download/</code>，完成后自动标记「已下载」。
       <span id="modeHint" class="mode-hint"></span>
     </p>
-    <div class="progress" id="dlProgressPanel" hidden>
-      <div class="progress-track"><div class="progress-bar" id="dlProgressBar"></div></div>
-      <div class="progress-text" id="dlProgressText"></div>
-      <pre class="log" id="dlLogBox"></pre>
+    <div class="queue-panel" id="dlProgressPanel" hidden>
+      <div class="queue-head">
+        <span class="queue-title">下载队列</span>
+        <span class="progress-text" id="dlProgressText"></span>
+        <button id="queueCancelAllBtn" class="btn ghost">取消排队</button>
+      </div>
+      <div class="queue-list" id="queueList"></div>
     </div>
   </section>
 

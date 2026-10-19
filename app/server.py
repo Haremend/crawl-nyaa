@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
 from . import config, covers as covers_mod, db
-from .downloader import DownloadService
+from .download_queue import DownloadQueue
 from .filenames import download_filename
 from .scraper import FetchError, Fetcher
 from .upstream import UpstreamClient, UpstreamError
@@ -118,7 +118,8 @@ class ApiServer(ThreadingHTTPServer):
         self.web_dir = Path(web_dir) if web_dir else config.WEB_DIR
         self.cover_dir = Path(config.COVER_DIR)
         self.service = ScrapeService(self.db_path)
-        self.download_service = DownloadService(self.db_path)
+        self.download_queue = DownloadQueue(self.db_path)
+        self.download_queue.start()
         # 启动时恢复上次保存的代理开关（云服务器上通常关闭代理直连）
         saved = db.get_setting("proxy_enabled", "", self.db_path)
         if saved != "":
@@ -228,10 +229,13 @@ class Handler(BaseHTTPRequestHandler):
                         skip_downloaded=query.get("redownload", ["0"])[0] not in ("1", "true", "yes"))
                     self._json({"ok": True, "mode": "want", "items": items,
                                 "total": len(items)})
+            elif path == "/api/download/jobs":
+                limit = _int_param(query, "limit", 100, 1, 500)
+                self._json({"ok": True, **self.server.download_queue.snapshot(limit)})
             elif path == "/api/download/file":
                 self._handle_download_file(query)
             elif path == "/api/download/status":
-                self._json({"ok": True, **self.server.download_service.snapshot()})
+                self._json({"ok": True, **self.server.download_queue.snapshot()})
             elif path == "/api/scrape/status":
                 self._json({"ok": True, **self.server.service.snapshot()})
             elif path == "/api/thumb":
@@ -292,7 +296,7 @@ class Handler(BaseHTTPRequestHandler):
             "proxy_enabled": config.PROXY_ENABLED,
             "proxy_address": config.PROXY,
             "batches": db.list_batches(self.server.db_path),
-            "download_status": self.server.download_service.snapshot(),
+            "download_status": self.server.download_queue.snapshot(),
             "stats": db.stats(self.server.db_path),
             "limits": {
                 "max_pages": config.MAX_PAGES,
@@ -794,15 +798,21 @@ class Handler(BaseHTTPRequestHandler):
                 except UpstreamError as exc:
                     self._error(f"API Key 校验失败：{exc}", exc.status or 401)
                     return
-                try:
-                    state = self.server.download_service.start(
-                        api_key, str(payload.get("format") or "zip"),
-                        mode="batch", batch_id=int(payload.get("batch_id") or 0),
-                        redownload=bool(payload.get("redownload", False)))
-                except UpstreamError as exc:
-                    self._error(str(exc), exc.status or 400)
+                fmt = str(payload.get("format") or "zip")
+                batch_id = int(payload.get("batch_id") or 0)
+                redownload = bool(payload.get("redownload", False))
+                if batch_id <= 0:
+                    self._error("请先选择一个批次", 400)
                     return
-                self._json({"ok": True, "download": state})
+                targets = db.list_batch_targets(self.server.db_path, batch_id,
+                                                skip_downloaded=not redownload)
+                if not targets:
+                    self._error("该批次没有需要下载的作品（可勾选「重新下载」忽略已下载标记）", 400)
+                    return
+                result = self.server.download_queue.enqueue_many(
+                    targets, fmt, api_key=api_key, source="batch", batch_id=batch_id)
+                self._json({"ok": True, "queued": result["queued"], "total": result["total"],
+                            "queue": self.server.download_queue.snapshot()})
             elif path == "/api/download/start":
                 payload = self._read_json()
                 if payload is None:
@@ -821,18 +831,54 @@ class Handler(BaseHTTPRequestHandler):
                 except UpstreamError as exc:
                     self._error(f"API Key 校验失败：{exc}", exc.status or 401)
                     return
-                try:
-                    state = self.server.download_service.start(
-                        api_key, str(payload.get("format") or "zip"),
-                        redownload=bool(payload.get("redownload", False)))
-                except UpstreamError as exc:
-                    self._error(str(exc), exc.status or 400)
+                fmt = str(payload.get("format") or "zip")
+                redownload = bool(payload.get("redownload", False))
+                targets = db.list_want_download_targets(
+                    self.server.db_path, skip_downloaded=not redownload)
+                if not targets:
+                    self._error("没有需要下载的作品（可勾选「重新下载」忽略已下载标记）", 400)
                     return
-                self._json({"ok": True, "download": state})
+                result = self.server.download_queue.enqueue_many(
+                    targets, fmt, api_key=api_key, source="want")
+                self._json({"ok": True, "queued": result["queued"], "total": result["total"],
+                            "queue": self.server.download_queue.snapshot()})
             elif path == "/api/download/cancel":
-                self._json({"ok": True,
-                            "cancelled": self.server.download_service.cancel(),
-                            **self.server.download_service.snapshot()})
+                info = self.server.download_queue.cancel_all()
+                self._json({"ok": True, **info, **self.server.download_queue.snapshot()})
+            elif path == "/api/download/enqueue":
+                # 单个作品入队（立即下载按钮）：任务在服务端跑，进度对所有页面可见
+                payload = self._read_json()
+                if payload is None:
+                    return
+                api_key = self._api_key(parse_qs(urlsplit(self.path).query))
+                if not api_key:
+                    self._error("缺少 API Key", 401)
+                    return
+                try:
+                    gallery_id = int(payload.get("gallery_id") or 0)
+                except (TypeError, ValueError):
+                    gallery_id = 0
+                if gallery_id <= 0:
+                    self._error("缺少有效的 gallery_id", 400)
+                    return
+                job = self.server.download_queue.enqueue(
+                    gallery_id, str(payload.get("format") or "zip"),
+                    api_key=api_key, source="manual")
+                self._json({"ok": True, "job": job,
+                            "queue": self.server.download_queue.snapshot()})
+            elif path == "/api/download/jobs/cancel":
+                payload = self._read_json()
+                if payload is None:
+                    return
+                if payload.get("all"):
+                    info = self.server.download_queue.cancel_all()
+                else:
+                    try:
+                        job_id = int(payload.get("job_id") or 0)
+                    except (TypeError, ValueError):
+                        job_id = 0
+                    info = self.server.download_queue.cancel(job_id) if job_id else {"cancelled": False}
+                self._json({"ok": True, **info, **self.server.download_queue.snapshot()})
             elif path == "/api/reset":
                 removed = db.reset_all(self.server.db_path)
                 self._json({"ok": True, "removed": removed})
