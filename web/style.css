@@ -334,3 +334,6 @@ img.thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
   border: 1px solid #f0cf9a; background: #fff9ee; color: #8a5a00;
   padding: 10px 14px; border-radius: 8px; font-size: 14px;
 }
+
+/* ================= 立即下载模式提示 ================= */
+.mode-hint { color: #1f5fbd; font-weight: 600; }

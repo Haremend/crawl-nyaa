@@ -79,6 +79,17 @@ function initApiKey() {
   state.key = fromUrl || readCookie(KEY_COOKIE);
 }
 
+/** 显示「立即下载」当前是缓存模式还是流式模式（由服务端 .env 决定）。 */
+function renderDownloadMode(mode) {
+  const box = $("modeHint");
+  if (!box) return;
+  if (mode === "cache") {
+    box.textContent = "立即下载：缓存模式（先存服务器磁盘再转发，重复下载不再请求上游）";
+  } else {
+    box.textContent = "立即下载：流式模式（64KB 边下边转，不占服务器磁盘）";
+  }
+}
+
 function renderSiteChip(origin) {
   const value = (origin || "").trim();
   $("siteChip").textContent = value ? ("站点 " + value.replace(/^https?:\/\//, "")) : "站点 未设置";
@@ -271,6 +282,7 @@ async function loadMeta() {
   renderLastRun(meta.stats.last_run);
   renderDownloadSummary(meta.download_status);
   renderSiteChip(meta.site_origin);
+  renderDownloadMode(meta.download_mode);
   state.batches = meta.batches || [];
   renderBatchOptions();
   renderSetupHint(meta);

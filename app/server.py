@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import mimetypes
+import os
 import sys
 import threading
 import webbrowser
@@ -19,6 +20,21 @@ from .filenames import download_filename
 from .scraper import FetchError, Fetcher
 from .upstream import UpstreamClient, UpstreamError
 from .service import ScrapeError, ScrapeService
+
+
+# 同一作品的缓存下载锁，避免浏览器并发点击时重复请求上游
+_CACHE_LOCKS: dict[int, threading.Lock] = {}
+_CACHE_LOCKS_GUARD = threading.Lock()
+
+
+def _cache_lock(gallery_id: int) -> threading.Lock:
+    """取某个作品的缓存锁（不存在则创建）。"""
+    with _CACHE_LOCKS_GUARD:
+        lock = _CACHE_LOCKS.get(int(gallery_id))
+        if lock is None:
+            lock = threading.Lock()
+            _CACHE_LOCKS[int(gallery_id)] = lock
+        return lock
 
 
 def _download_filename(gallery_id: int, fmt: str, title: str = "") -> str:
@@ -272,6 +288,7 @@ class Handler(BaseHTTPRequestHandler):
             "cover_dir": str(config.COVER_DIR),
             "download_dir": str(config.DOWNLOADS_DIR),
             "site_origin": db.get_site_origin(self.server.db_path),
+            "download_mode": config.DOWNLOAD_MODE,
             "proxy_enabled": config.PROXY_ENABLED,
             "proxy_address": config.PROXY,
             "batches": db.list_batches(self.server.db_path),
@@ -416,6 +433,16 @@ class Handler(BaseHTTPRequestHandler):
         if fmt not in ("zip", "cbz", "torrent"):
             fmt = "zip"
 
+        title = db.get_title(gallery_id, self.server.db_path)
+        filename = _download_filename(gallery_id, fmt, title)
+
+        # cache 模式：先查缓存。命中就直接读盘转发，完全不请求上游
+        if config.DOWNLOAD_MODE == "cache":
+            cached = self._find_cached_file(gallery_id, fmt)
+            if cached is not None:
+                self._send_local_file(cached, cached.name)
+                return
+
         try:
             info = UpstreamClient(origin, api_key).get_download_url(gallery_id, fmt)
         except UpstreamError as exc:
@@ -426,8 +453,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send_download_error("上游未返回下载地址。", 502)
             return
 
-        title = db.get_title(gallery_id, self.server.db_path)
-        filename = _download_filename(gallery_id, fmt, title)
+        # cache 模式：落盘后再转发（内部有锁 + 二次检查，避免并发重复下载）
+        if config.DOWNLOAD_MODE == "cache":
+            cached = self._ensure_cached_file(gallery_id, fmt, url, origin, filename)
+            if cached is None:
+                self._send_download_error("下载失败：无法缓存到服务器磁盘。", 502)
+                return
+            self._send_local_file(cached, cached.name)
+            return
+
+        # stream 模式：64KB 边读边转发，不在服务器落盘
         fetcher = Fetcher()
         try:
             response = fetcher.open_stream(url, referer=f"{origin}/g/{gallery_id}/")
@@ -459,6 +494,99 @@ class Handler(BaseHTTPRequestHandler):
                 response.close()
             except Exception:
                 pass
+
+    def _find_cached_file(self, gallery_id: int, fmt: str):
+        """在下载目录里找已缓存的文件（兼容 hhh 与历史命名）。"""
+        cache_dir = Path(config.DOWNLOADS_DIR)
+        if not cache_dir.is_dir():
+            return None
+        ext = fmt if fmt in ("zip", "cbz", "torrent") else "zip"
+        candidates = [f for f in cache_dir.glob(f"{int(gallery_id)}_*.{ext}")
+                      if f.is_file() and f.stat().st_size > 0]
+        legacy = cache_dir / f"{int(gallery_id)}.{ext}"
+        if legacy.is_file() and legacy.stat().st_size > 0:
+            candidates.append(legacy)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda f: f.stat().st_mtime)
+
+    def _ensure_cached_file(self, gallery_id: int, fmt: str, url: str, origin: str, filename: str):
+        """cache 模式：确保文件已存在于服务器磁盘，返回文件路径。
+
+        已存在则直接复用；不存在则边下边写盘（先写 .part 再原子改名），
+        同一作品并发点击时用锁保证只下载一次。
+        """
+        cached = self._find_cached_file(gallery_id, fmt)
+        if cached is not None:
+            return cached
+
+        cache_dir = Path(config.DOWNLOADS_DIR)
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+        target = cache_dir / filename
+
+        with _cache_lock(gallery_id):
+            cached = self._find_cached_file(gallery_id, fmt)   # 双重检查
+            if cached is not None:
+                return cached
+            temp = target.with_name(target.name + ".part")
+            fetcher = Fetcher()
+            try:
+                response = fetcher.open_stream(url, referer=f"{origin}/g/{gallery_id}/")
+            except FetchError:
+                return None
+            try:
+                with open(temp, "wb") as fh:
+                    while True:
+                        chunk = response.read(65536)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+            except (OSError, FetchError):
+                try:
+                    temp.unlink()
+                except OSError:
+                    pass
+                return None
+            finally:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+            try:
+                if temp.stat().st_size <= 0:
+                    temp.unlink()
+                    return None
+                os.replace(temp, target)          # 原子替换，避免半成品被读到
+            except OSError:
+                return None
+            return target
+
+    def _send_local_file(self, path: Path, filename: str) -> None:
+        """把服务器磁盘上的文件按块发给浏览器（同样不整块读进内存）。"""
+        try:
+            size = path.stat().st_size
+        except OSError:
+            self._send_download_error("缓存文件读取失败。", 500)
+            return
+        content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Disposition", _content_disposition(filename))
+        self.send_header("Content-Length", str(size))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            with open(path, "rb") as fh:
+                while True:
+                    chunk = fh.read(65536)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except OSError:
+            self.close_connection = True
 
     def _handle_thumb(self, query: dict) -> None:
         raw = (query.get("u", [""])[0] or "").strip()

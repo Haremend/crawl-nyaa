@@ -10,6 +10,11 @@ import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# 先加载项目根目录的 .env（已存在的环境变量优先，不会被覆盖）
+from .envfile import load_env  # noqa: E402 必须在读取下面的配置之前执行
+
+load_env(BASE_DIR / ".env")
 DATA_DIR = Path(os.environ.get("CLAW_DATA_DIR", BASE_DIR / "data"))
 DB_PATH = Path(os.environ.get("CLAW_DB", DATA_DIR / "gallery.sqlite3"))
 CACHE_DIR = DATA_DIR / "cache"
@@ -20,6 +25,14 @@ COVER_DIR = Path(os.environ.get("CLAW_COVER_DIR", BASE_DIR / "cover"))
 DOWNLOADS_DIR = Path(os.environ.get("CLAW_DOWNLOADS_DIR", BASE_DIR / "download"))
 # 批量下载时每个文件之间的间隔（秒）
 DOWNLOAD_DELAY = float(os.environ.get("CLAW_DOWNLOAD_DELAY", "1.0"))
+
+# 「立即下载」取文件方式（也可在 .env 里配置）：
+#   cache  = 先保存到服务器磁盘（download/），再读盘转发给浏览器；
+#            重复下载不再请求上游，适合磁盘充足的 VPS
+#   stream = 64KB 流式转发，不占服务器磁盘，适合磁盘紧张的 VPS
+DOWNLOAD_MODE = (os.environ.get("CLAW_DOWNLOAD_MODE", "stream") or "stream").strip().lower()
+if DOWNLOAD_MODE not in ("cache", "stream"):
+    DOWNLOAD_MODE = "stream"
 WEB_DIR = BASE_DIR / "web"
 SAMPLES_DIR = BASE_DIR / "samples"
 
