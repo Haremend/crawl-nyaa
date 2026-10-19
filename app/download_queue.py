@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import sqlite3
 import threading
 import time
 import traceback
@@ -128,7 +129,26 @@ class DownloadQueue:
     # ---------- worker ----------
     def _worker(self, index: int) -> None:
         while not self._stop.is_set():
-            job = db.claim_next_job(self.db_path)
+            # 注意：claim_next_job 必须在 try 内——若 download_jobs 表缺失或 DB
+            # 未初始化，SELECT 会抛 OperationalError；放在 try 外会让 worker
+            # 线程直接退出死亡，5 个全死则整队静默停摆。这里捕获后自愈建表，
+            # 退避重试，保证 worker 永久存活。
+            try:
+                job = db.claim_next_job(self.db_path)
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc).lower():
+                    try:
+                        db.init_db(self.db_path)
+                    except Exception:
+                        traceback.print_exc()
+                else:
+                    traceback.print_exc()
+                time.sleep(1.0)
+                continue
+            except Exception:
+                traceback.print_exc()
+                time.sleep(1.0)
+                continue
             if job is None:
                 time.sleep(0.4)
                 continue

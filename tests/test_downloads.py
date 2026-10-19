@@ -1,5 +1,6 @@
 """待下载 / 已下载 / 站点收藏 / 下载服务测试（全部离线）。"""
 import shutil
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -184,6 +185,58 @@ class DownloadServiceTests(unittest.TestCase):
         snapshot = service.snapshot()
         self.assertFalse(snapshot["running"])
         self.assertEqual(snapshot["status"], "idle")
+
+
+
+
+class DownloadQueueSelfHealTests(unittest.TestCase):
+    """download_jobs 表缺失时 worker 不应死亡，应自愈建表后继续轮询。
+
+    回归测试：早期 _worker 把 db.claim_next_job() 放在 try/except 之外，
+    一旦 download_jobs 表不存在（DB 未初始化 / 迁移未完成），SELECT 抛
+    OperationalError 会直接逃出 while 循环，worker 线程永久死亡，
+    5 个全死则整队静默停摆。
+    """
+
+    def setUp(self):
+        self.tmp = make_temp_dir("dqheal")
+        self.db_path = self.tmp / "t.sqlite3"
+        # 只创建 DB 文件、不建任何表，模拟“DB 未初始化”场景
+        conn = db.connect(self.db_path)
+        conn.close()
+        self.queue = None
+
+    def tearDown(self):
+        if self.queue is not None:
+            self.queue.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_worker_self_heals_missing_table(self):
+        from app.download_queue import DownloadQueue
+        self.queue = DownloadQueue(self.db_path, workers=2)
+        self.queue.start()
+        # worker 启动后立即应处于存活状态
+        self.assertTrue(self.queue.running)
+
+        # 自愈需要在 worker 首次轮询后发生；最多等 5 秒
+        healed = False
+        for _ in range(25):
+            conn = db.connect(self.db_path)
+            try:
+                names = {row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")}
+            except Exception:
+                names = set()
+            finally:
+                conn.close()
+            if "download_jobs" in names:
+                healed = True
+                break
+            time.sleep(0.2)
+
+        self.assertTrue(healed, "自愈后 download_jobs 表应存在")
+        # 自愈后 worker 仍存活（没有因缺表而死亡）
+        self.assertTrue(self.queue.running)
 
 
 if __name__ == "__main__":
