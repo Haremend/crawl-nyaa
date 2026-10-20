@@ -120,12 +120,31 @@ class AuthAndIsolationTests(unittest.TestCase):
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        # 快照全局 Supabase 配置（本文件其他测试可能已改），统一在 tearDown 恢复
+        self._sb_snapshot = (
+            supabase_client.config.SUPABASE_PROJECT_REF,
+            supabase_client.config.SUPABASE_TOKEN,
+            supabase_client.config.SUPABASE_API_URL,
+            supabase_client.config.SUPABASE_DB_URL,
+            supabase_client.config.SUPABASE_TIMEOUT,
+        )
+        # 隔离本测试类：强制「未配置云端」，注册/登录的回退路径不触网
+        supabase_client.config.SUPABASE_PROJECT_REF = ""
+        supabase_client.config.SUPABASE_TOKEN = ""
+        supabase_client.set_transport(None)
 
     def tearDown(self):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
         db.config.USER_DATA_DIR = self._orig_user_data_dir
+        self._restore_supabase()
+
+    def _restore_supabase(self):
+        supabase_client.config.SUPABASE_PROJECT_REF, supabase_client.config.SUPABASE_TOKEN, \
+            supabase_client.config.SUPABASE_API_URL, supabase_client.config.SUPABASE_DB_URL, \
+            supabase_client.config.SUPABASE_TIMEOUT = self._sb_snapshot
+        supabase_client.set_transport(None)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_register_login_me_logout(self):
@@ -245,9 +264,15 @@ class SyncStatusTests(unittest.TestCase):
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
-        # 确保云端未配置
-        self._orig_ref = supabase_client.config.SUPABASE_PROJECT_REF
-        self._orig_tok = supabase_client.config.SUPABASE_TOKEN
+        # 快照全局 Supabase 配置（本文件其他测试可能已改），统一在 tearDown 恢复
+        self._sb_snapshot = (
+            supabase_client.config.SUPABASE_PROJECT_REF,
+            supabase_client.config.SUPABASE_TOKEN,
+            supabase_client.config.SUPABASE_API_URL,
+            supabase_client.config.SUPABASE_DB_URL,
+            supabase_client.config.SUPABASE_TIMEOUT,
+        )
+        # 本测试类验证「未配置云端」语义，强制清空（与本文件其他测试隔离）
         supabase_client.config.SUPABASE_PROJECT_REF = ""
         supabase_client.config.SUPABASE_TOKEN = ""
         supabase_client.set_transport(None)
@@ -257,8 +282,12 @@ class SyncStatusTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join(timeout=5)
         db.config.USER_DATA_DIR = self._orig_user_data_dir
-        supabase_client.config.SUPABASE_PROJECT_REF = self._orig_ref
-        supabase_client.config.SUPABASE_TOKEN = self._orig_tok
+        self._restore_supabase()
+
+    def _restore_supabase(self):
+        supabase_client.config.SUPABASE_PROJECT_REF, supabase_client.config.SUPABASE_TOKEN, \
+            supabase_client.config.SUPABASE_API_URL, supabase_client.config.SUPABASE_DB_URL, \
+            supabase_client.config.SUPABASE_TIMEOUT = self._sb_snapshot
         supabase_client.set_transport(None)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -393,11 +422,33 @@ class SyncFlowTests(unittest.TestCase):
 
 
 class OldDbCompatTests(unittest.TestCase):
-    """已运行过的旧库迁移兼容性：download_jobs 没有 username/origin 列时不能崩。"""
+    """已运行过的旧库迁移兼容性：download_jobs 没有 username/origin 列时不能崩。
+
+    注：本模块其他测试会把全局 config.SUPABASE_* 切到 FakeTransport/本地配置，
+    这里统一用 setUp 里存好的快照恢复，避免真实 token 被带进后续测试。
+    """
 
     def setUp(self):
         self.tmp = make_temp_dir("oldcompat")
         self.db_path = self.tmp / "old.sqlite3"
+        # 快照全局 Supabase 配置与传输层（本文件前面可能已改成测试值）
+        self._sb_snapshot = (
+            supabase_client.config.SUPABASE_PROJECT_REF,
+            supabase_client.config.SUPABASE_TOKEN,
+            supabase_client.config.SUPABASE_API_URL,
+            supabase_client.config.SUPABASE_DB_URL,
+            supabase_client.config.SUPABASE_TIMEOUT,
+        )
+        supabase_client.config.SUPABASE_PROJECT_REF = "test-ref"
+        supabase_client.config.SUPABASE_TOKEN = "test-token"
+        supabase_client.set_transport(None)
+
+    def tearDown(self):
+        supabase_client.config.SUPABASE_PROJECT_REF, supabase_client.config.SUPABASE_TOKEN, \
+            supabase_client.config.SUPABASE_API_URL, supabase_client.config.SUPABASE_DB_URL, \
+            supabase_client.config.SUPABASE_TIMEOUT = self._sb_snapshot
+        supabase_client.set_transport(None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)

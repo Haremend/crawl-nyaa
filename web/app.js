@@ -180,15 +180,17 @@ async function loadAuth() {
 
 function renderAuth() {
   const area = $("authArea");
+  const cloudMode = state.meta && state.meta.storage_backend === "cloud";
   if (state.user) {
     area.innerHTML =
       '<span class="user-name" title="当前登录用户">' + esc(state.user.username) + "</span>"
       + '<span class="auth-divider"></span>'
-      + '<button class="btn ghost" id="settingsBtn" title="站点域名 / API Key / 数据同步">设置</button>'
-      + '<button class="btn ghost" id="syncBtnTop">同步</button>'
+      + '<button class="btn ghost" id="settingsBtn" title="站点域名 / API Key'
+      + (cloudMode ? "" : " / 数据同步") + '">设置</button>'
+      + (cloudMode ? "" : '<button class="btn ghost" id="syncBtnTop">同步</button>')
       + '<button class="btn ghost" id="logoutBtn">退出</button>';
     $("settingsBtn").addEventListener("click", openSettingsModal);
-    $("syncBtnTop").addEventListener("click", openSettingsModal);
+    if (!cloudMode) $("syncBtnTop").addEventListener("click", openSettingsModal);
     $("logoutBtn").addEventListener("click", logout);
     hideGate();
   } else {
@@ -228,12 +230,23 @@ async function submitAuth() {
   }
   $("authSubmit").disabled = true;
   try {
-    await api(path, {
+    const data = await api(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    toast(state.authTab === "login" ? "登录成功" : "注册成功", "ok");
+    if (state.authTab === "login") {
+      toast("登录成功", "ok");
+    } else {
+      // 注册 toast 区分：是否真正写进了云端
+      if (data && data.cloud_error && !data.cloud_registered) {
+        toast("已注册到本地；云端未生效：" + data.cloud_error, "error");
+      } else if (data && data.cloud_registered) {
+        toast("注册成功（已同步到云端）", "ok");
+      } else {
+        toast("注册成功", "ok");
+      }
+    }
     closeAuthModal();
     state.key = "";  // 登录后不再依赖浏览器 Key
     deleteCookie(KEY_COOKIE);
@@ -271,7 +284,19 @@ function openSettingsModal() {
   $("settingsSite").value = state.user.site_origin || "";
   $("settingsKey").value = "";
   $("syncResult").textContent = "";
-  loadSyncStatus();
+  const cloudMode = state.meta && state.meta.storage_backend === "cloud";
+  // 云模式：数据直连云端，无需同步；隐藏同步区块并提示
+  document.querySelectorAll("#syncRow, #syncResult").forEach((el) => { el.hidden = false; });
+  if (cloudMode) {
+    const syncRow = document.getElementById("syncRow");
+    if (syncRow) syncRow.style.display = "none";
+    $("syncStatusText").textContent = "云模式：数据直连云端，无需同步。";
+    $("syncBtn").disabled = true;
+  } else {
+    const syncRow = document.getElementById("syncRow");
+    if (syncRow) syncRow.style.display = "";
+    loadSyncStatus();
+  }
 }
 
 function closeSettingsModal() { $("settingsModal").hidden = true; }
@@ -289,7 +314,6 @@ async function saveSettings() {
       body: JSON.stringify(body),
     });
     state.user.has_api_key = Boolean(data.has_api_key);
-    state.user.site_origin = data.site_origin || "";
     const note = data.cloud_pushed ? "（已同步到云端）" : (data.cloud_error ? "（云端未同步：" + data.cloud_error + "）" : "");
     toast("已保存" + note, "ok");
     await loadMeta().catch(() => {});

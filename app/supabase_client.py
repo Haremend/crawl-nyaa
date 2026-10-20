@@ -2,14 +2,20 @@
 
 设计要点
 --------
-* 只依赖标准库：通过 Supabase Management API 的 SQL 查询端点执行 SQL，
-  不引入第三方 SDK，也不在仓库里放任何密钥（token 从环境变量读取）。
+* 只依赖标准库：通过 Supabase 项目的 Postgres REST 查询端点
+  （``https://<ref>.supabase.co/database/query``）执行 SQL，
+  用 Service Role Key（``sb_secret_...``）做 Bearer 认证，不引入第三方 SDK。
+  该端点接受 JSON 形如 ``{"query": "sql"}`` 的 POST 请求，返回 JSON 行数组。
+* 旧版走 Management API（``api.supabase.com``）需要账号级 PAT，已弃用；
+  Service Role Key 直连项目数据库即可执行 DDL 与数据读写。
 * 云端表名统一加前缀（默认 claw_），表结构按「多租户」设计：
   每张业务表都带 username 列并作为复合主键的一部分，一个用户一套数据。
-* 数据仍以本地 SQLite 为准；云端只是跨部署共享的副本。
+* 本地模式：数据仍以本地 SQLite 为准，云端是跨部署共享的副本；
   「同步」= 先拉云端合并进本地（较新者胜），再把合并后的本地数据推回云端。
-* 所有表都开启 RLS（不建策略 = 非属主角色一律不可读写），
-  只有服务端用 Management API / 数据库属主身份才能访问。
+  云模式（CLAW_STORAGE_BACKEND=cloud）：业务数据直接读写云端，
+  不落本地 SQLite，此时没有同步操作（数据本就在云端）。
+* 所有表都开启 RLS 并撤销 anon / authenticated 的直接表权限；
+  读写一律走 Service Role（bypass RLS），不创建面向客户端的开放策略。
 """
 from __future__ import annotations
 
@@ -66,7 +72,16 @@ def _bool_int(value):
 # ============================================================
 
 class Transport:
-    """通过 Supabase Management API 执行 SQL。"""
+    """通过 Supabase Management API 的 SQL 查询端点执行 SQL。
+
+    端点：POST {api_url}/v1/projects/{project_ref}/database/query，
+    认证：Authorization: Bearer <PAT>（账号级 Personal Access Token）。
+
+    注意：Supabase 没有「纯 HTTP + Service Role Key 执行 SQL」的端点——
+    Service Role Key（sb_secret_...）走 Postgres TCP 直连（需 psycopg，违反
+    零依赖约束）；HTTP 路径上只有 Management API 的 /database/query，
+    它只接受账号级 PAT。因此 CLAW_SUPABASE_TOKEN 应填 PAT。
+    """
 
     def __init__(self, api_url, project_ref, token, timeout=30.0):
         self.api_url = (api_url or "https://api.supabase.com").rstrip("/")
@@ -76,7 +91,7 @@ class Transport:
 
     def query(self, sql, *, read_only=False):
         url = f"{self.api_url}/v1/projects/{self.project_ref}/database/query"
-        payload = json.dumps({"query": sql, "read_only": bool(read_only)}).encode("utf-8")
+        payload = json.dumps({"query": sql}).encode("utf-8")
         request = urllib.request.Request(
             url, data=payload, method="POST",
             headers={
@@ -109,7 +124,9 @@ class Transport:
         except ValueError as exc:
             raise SupabaseError(f"云端返回内容不是合法 JSON：{raw[:200]}", 0) from exc
         if isinstance(data, dict):
-            message = data.get("message") or data.get("error") or raw[:200]
+            if "rows" in data:
+                return list(data["rows"])
+            message = data.get("error") or data.get("message") or raw[:200]
             raise SupabaseError(f"云端执行失败：{message}", 400)
         return list(data) if isinstance(data, list) else []
 
@@ -229,10 +246,15 @@ def _columns_sql(columns):
 
 
 def ddl_statements():
-    """建表语句（幂等）。列名与 SQLite 保持一致，便于整行同步。"""
+    """建表语句（幂等）。列名与 SQLite 保持一致，便于整行同步。
+
+    末尾的 REVOKE 撤销 anon / authenticated 的直接表权限：
+    配合 RLS（无策略 = 默认拒绝），只有走 Service Role（bypass RLS）
+    的服务端凭据才能读写；客户端永远拿不到表数据。
+    """
     galleries_body = _columns_sql(_GALLERY_DDL_COLUMNS) + ',\n  primary key ("username", "gallery_id")'
     runs_body = _columns_sql(_RUNS_DDL_COLUMNS) + ',\n  primary key ("username", "url")'
-    return [
+    stmts = [
         f'''create table if not exists public.{_q(USERS_TABLE)} (
   "username" text primary key,
   "password_hash" text not null default '',
@@ -252,6 +274,11 @@ def ddl_statements():
             idx=_ident(table(RUNS_TABLE) + "_user_idx"), tbl=_q(RUNS_TABLE)),
         f"alter table public.{_q(RUNS_TABLE)} enable row level security",
     ]
+    for name in (USERS_TABLE, GALLERIES_TABLE, RUNS_TABLE):
+        stmts.append(
+            f"revoke all on table public.{_q(name)} from anon, authenticated"
+        )
+    return stmts
 
 
 def ensure_tables():
@@ -474,3 +501,86 @@ def push_user_credentials(username, *, api_key, site_origin,
     )
     run_sql(sql)
     return {"ok": True, "username": username}
+
+
+_ACCOUNT_COLS = ["username", "password_hash", "salt", "api_key", "site_origin", "created_at"]
+
+
+def _account_columns_sql():
+    return ", ".join(_ident(c) for c in _ACCOUNT_COLS)
+
+
+def _account_row(row: dict) -> dict:
+    """把云端账号行规整成与本地 users 表一致的字段（去掉云端特有列）。"""
+    out = {c: row.get(c) for c in _ACCOUNT_COLS}
+    out.pop("created_at", None)
+    for c in _ACCOUNT_COLS:
+        if out.get(c) is None:
+            out[c] = ""
+    return out
+
+
+def fetch_account(username) -> dict | None:
+    """拉取单个账号记录（不存在返回 None）。"""
+    _require_config()
+    ensure_tables()
+    rows = run_sql(
+        f'select {_account_columns_sql()} from public.{_q(USERS_TABLE)} '
+        f'where "username" = {_literal(str(username))}',
+        read_only=True,
+    )
+    if not rows:
+        return None
+    return _account_row(rows[0])
+
+
+def fetch_accounts_all() -> list[dict]:
+    """拉取全部账号（供本地模式启动时把云端账号加载进本地 users 表）。"""
+    _require_config()
+    ensure_tables()
+    rows = run_sql(
+        f'select {_account_columns_sql()} from public.{_q(USERS_TABLE)} order by "username"',
+        read_only=True,
+    )
+    return [_account_row(r) for r in rows]
+
+
+# ============================================================
+# 云模式：业务数据直接读写云端（CLAW_STORAGE_BACKEND=cloud）
+# 本地模式不走这些；这里只是把 SQL 语义封装出来供 server 分叉调用。
+# ============================================================
+
+def cloud_mark_gallery_flags(username, gallery_ids, *, flag_col: str, value: bool) -> int:
+    """批量设置某用户的作品标记（want_download / downloaded / hidden / site_favorite）。
+
+    用 OR 合并（置 1）或 AND 语义（置 0）避免旧副本意外清空：
+    - value=True：``flag = true``（直接覆盖，因为「标记」本身是用户主动行为）
+    - value=False：``flag = false``（取消标记）
+    返回受影响的行数。
+    """
+    _require_config()
+    ensure_tables()
+    ids = [int(g) for g in gallery_ids if int(g or 0) > 0]
+    if not ids:
+        return 0
+    marks = ", ".join(_literal(i) for i in ids)
+    setter = "true" if value else "false"
+    sql = (
+        f'update public.{_q(GALLERIES_TABLE)} '
+        f'set "{flag_col}" = {setter} where "username" = {_literal(str(username))} '
+        f'and "gallery_id" in ({marks})'
+    )
+    run_sql(sql)
+    return len(ids)
+
+
+def cloud_fetch_gallery_rows(username) -> list[dict]:
+    """拉取某用户全部作品行（云模式浏览/筛选/排序的数据源）。"""
+    data = fetch_user(username)
+    return data["galleries"]
+
+
+def cloud_fetch_run_rows(username) -> list[dict]:
+    """拉取某用户全部批次行（云模式批次列表的数据源）。"""
+    data = fetch_user(username)
+    return data["runs"]

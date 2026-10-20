@@ -450,6 +450,7 @@ class Handler(BaseHTTPRequestHandler):
                 "site_origin": user.get("site_origin", "") if user else "",
             },
             "supabase_configured": supabase_client.configured(),
+            "storage_backend": "cloud" if config.storage_is_cloud() else "local",
         })
 
     def _handle_works(self, query: dict) -> None:
@@ -469,16 +470,94 @@ class Handler(BaseHTTPRequestHandler):
         batch_id = _int_param(query, "batch", 0, 0, 10 ** 9) or None
         page = _int_param(query, "page", 1, 1, 100000)
         per_page = _int_param(query, "per_page", 24, 1, 200)
-        data = db.query_works(
-            q=q, languages=languages, dedupe_title=dedupe, sort=sort,
-            page=page, per_page=per_page, uncensored=uncensored,
-            want_download_only=want_only, downloaded_only=downloaded_only,
-            site_favorites_only=site_only, batch_id=batch_id, path=user_db,
-        )
+        if config.storage_is_cloud():
+            # 云模式：数据源是云端作品行，去重聚类/选版/排序在内存里复用
+            # db 的纯函数实现，不经过本地 SQLite
+            data = self._cloud_query_works(
+                user, q=q, languages=languages, dedupe_title=dedupe, sort=sort,
+                page=page, per_page=per_page, uncensored=uncensored,
+                want_download_only=want_only, downloaded_only=downloaded_only,
+                site_favorites_only=site_only, batch_id=batch_id,
+            )
+        else:
+            data = db.query_works(
+                q=q, languages=languages, dedupe_title=dedupe, sort=sort,
+                page=page, per_page=per_page, uncensored=uncensored,
+                want_download_only=want_only, downloaded_only=downloaded_only,
+                site_favorites_only=site_only, batch_id=batch_id, path=user_db,
+            )
         for item in data["items"]:
             self._decorate(item)
         data["ok"] = True
         self._json(data)
+
+    def _cloud_query_works(self, user: dict, **filters) -> dict:
+        """云模式作品查询：拉云端作品行，内存里复用 db 的去重/选版/排序。"""
+        username = user["username"]
+        try:
+            rows = supabase_client.cloud_fetch_gallery_rows(username)
+        except supabase_client.SupabaseError as exc:
+            self._error(str(exc), exc.status or 502)
+            return {"items": [], "total": 0, "page": 1, "pages": 1, "per_page": 1,
+                    "raw_total": 0, "unique_total": 0, "language_stats": [],
+                    "dedupe": False, "sort": "recent"}
+        if not rows:
+            return {
+                "items": [], "total": 0, "page": 1, "pages": 1,
+                "per_page": int(filters.get("per_page") or 24),
+                "raw_total": 0, "unique_total": 0, "dedupe": filters.get("dedupe_title", True),
+                "sort": filters.get("sort", "recent"), "language_stats": [],
+            }
+        # db 的聚类/序列化/排序只依赖 row[key] 按键访问，普通 dict 即可复用
+        row_dicts = [dict(r) for r in rows]
+        # 走 db 的内存聚类 + 序列化 + 过滤 + 排序 + 分页（与本地路径完全同规则）
+        wanted = [str(v).strip().lower() for v in (filters.get("languages") or []) if str(v).strip()]
+        groups = db._cluster_rows(row_dicts, filters.get("dedupe_title", True))
+        items = [db._serialize_group(group, wanted) for group in groups]
+        counter = {}
+        for it in items:
+            for key in it["language_keys"]:
+                counter[key] = counter.get(key, 0) + 1
+        language_stats = [
+            {"key": k, "label": config.language_label(k), "count": c}
+            for k, c in sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
+        ]
+        if wanted:
+            ws = set(wanted)
+            items = [it for it in items if ws.intersection(it["language_keys"])]
+        if filters.get("uncensored"):
+            items = [it for it in items if it["uncensored"]]
+        if filters.get("want_download_only"):
+            items = [it for it in items if it["want_download"]]
+        if filters.get("downloaded_only"):
+            items = [it for it in items if it["downloaded"]]
+        if filters.get("site_favorites_only"):
+            items = [it for it in items if it["site_favorite"]]
+        if filters.get("batch_id"):
+            items = [it for it in items if it["batch_id"] == int(filters["batch_id"])]
+        if filters.get("q"):
+            kw = str(filters["q"])
+            items = [
+                it for it in items
+                if (kw in it.get("title", "") or kw in it.get("title_original", "")
+                    or any(kw in t for t in it.get("tags", []))
+                    or any(kw in a for a in it.get("artists", []))
+                    or any(kw in g for g in it.get("groups", [])))
+            ]
+        items = db._sort_items(items, filters.get("sort") or "recent")
+        total = len(items)
+        per_page = max(1, min(int(filters.get("per_page") or 24), 200))
+        pages = max(1, -(-total // per_page)) if total else 1
+        page_no = max(1, min(int(filters.get("page") or 1), pages))
+        start = (page_no - 1) * per_page
+        return {
+            "items": items[start:start + per_page],
+            "total": total, "page": page_no, "pages": pages, "per_page": per_page,
+            "raw_total": len(row_dicts), "unique_total": len(groups),
+            "dedupe": filters.get("dedupe_title", True),
+            "sort": filters.get("sort", "recent"),
+            "language_stats": language_stats,
+        }
 
     def _decorate(self, item: dict) -> dict:
         """给作品补上缩略图代理路径与本地封面路径。"""
@@ -894,6 +973,20 @@ class Handler(BaseHTTPRequestHandler):
         password = str(payload.get("password") or "")
         api_key = str(payload.get("api_key") or "").strip()
         site_origin = normalize_origin(str(payload.get("site_origin") or ""))
+        cloud_used = False
+        cloud_error = ""
+        # 注册永远尝试写云端（claw_users）：不同设备登录免重注册、Key 跟账号走。
+        # 本地模式允许云端失败时回退纯本地注册；云模式必须云端成功。
+        if supabase_client.configured():
+            try:
+                supabase_client.ensure_tables()
+                salt, digest = db.hash_password(password, salt=None)
+                supabase_client.push_user_credentials(
+                    username, api_key=api_key, site_origin=site_origin,
+                    password_hash=digest, salt=salt, created_at=db.utc_now())
+                cloud_used = True
+            except (supabase_client.SupabaseError, ValueError) as exc:
+                cloud_error = str(exc)
         try:
             created = db.register_user(username, password, api_key=api_key,
                                        site_origin=site_origin, path=self.server.db_path)
@@ -903,12 +996,13 @@ class Handler(BaseHTTPRequestHandler):
         if not created:
             self._error("用户名已被占用", 409)
             return
-        # 初始化用户库
-        user_db = db.user_db_path(created)
-        db.init_db(user_db)
+        if not config.storage_is_cloud():
+            # 云模式不建本地用户库（业务数据直连云端）
+            db.init_db(db.user_db_path(created))
         token = db.create_session(created, path=self.server.db_path)
         max_age = config.SESSION_TTL_HOURS * 3600
-        self._json({"ok": True, "username": created},
+        self._json({"ok": True, "username": created,
+                    "cloud_registered": cloud_used, "cloud_error": cloud_error},
                    headers={"Set-Cookie": self._session_cookie_header(token, max_age=max_age)})
 
     def _handle_login(self) -> None:
@@ -934,44 +1028,37 @@ class Handler(BaseHTTPRequestHandler):
     def _cloud_login_fallback(self, username: str, password: str) -> bool:
         """本地无该用户时，从云端账号表拉取记录并在本地重建后验证。"""
         try:
-            supabase_client.ensure_tables()
-            cols = ", ".join(supabase_client._ident(c) for c in
-                             ("username", "password_hash", "salt", "api_key", "site_origin", "created_at"))
-            rows = supabase_client.run_sql(
-                f"select {cols} from public.{supabase_client._q(supabase_client.USERS_TABLE)} "
-                f"where \"username\" = {supabase_client._literal(username)}",
-                read_only=True,
-            )
-            if not rows:
-                return False
-            row = rows[0]
-            salt = str(row.get("salt") or "")
-            stored_hash = str(row.get("password_hash") or "")
-            if not stored_hash or not salt:
-                return False
-            _, digest = db.hash_password(password, salt)
-            if not secrets.compare_digest(digest, stored_hash):
-                return False
-            # 验证通过：在本地账号库重建该用户记录，沿用云端的哈希/盐/Key/域名
-            if not db.get_user(username, self.server.db_path):
-                # 用占位密码先建行（满足唯一约束），下面再覆写真实哈希
-                db.register_user(username, "__cloud__placeholder__", path=self.server.db_path)
-            with db._WRITE_LOCK:
-                conn = db.connect(self.server.db_path)
-                try:
-                    conn.execute(
-                        "UPDATE users SET password_hash = ?, salt = ?, api_key = ?, site_origin = ? "
-                        "WHERE username = ?",
-                        (stored_hash, salt, str(row.get("api_key") or ""),
-                         str(row.get("site_origin") or ""), username),
-                    )
-                    conn.commit()
-                finally:
-                    conn.close()
-            db.init_db(db.user_db_path(username))
-            return True
+            account = supabase_client.fetch_account(username)
         except supabase_client.SupabaseError:
             return False
+        if not account:
+            return False
+        salt = str(account.get("salt") or "")
+        stored_hash = str(account.get("password_hash") or "")
+        if not stored_hash or not salt:
+            return False
+        _, digest = db.hash_password(password, salt)
+        if not secrets.compare_digest(digest, stored_hash):
+            return False
+        # 验证通过：在本地账号库重建该用户记录，沿用云端的哈希/盐/Key/域名
+        if not db.get_user(username, self.server.db_path):
+            # 用占位密码先建行（满足唯一约束），下面再覆写真实哈希
+            db.register_user(username, "__cloud__placeholder__", path=self.server.db_path)
+        with db._WRITE_LOCK:
+            conn = db.connect(self.server.db_path)
+            try:
+                conn.execute(
+                    "UPDATE users SET password_hash = ?, salt = ?, api_key = ?, site_origin = ? "
+                    "WHERE username = ?",
+                    (stored_hash, salt, str(account.get("api_key") or ""),
+                     str(account.get("site_origin") or ""), username),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        if not config.storage_is_cloud():
+            db.init_db(db.user_db_path(username))
+        return True
 
     def _handle_logout(self) -> None:
         cookies = _parse_cookies(self.headers.get("Cookie"))
@@ -1058,6 +1145,11 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- 同步 ----------
     def _handle_sync_status(self) -> None:
+        if config.storage_is_cloud():
+            self._json({"ok": True, "configured": True, "available": True,
+                        "cloud_mode": True,
+                        "message": "云模式：数据直连云端，无需同步"})
+            return
         configured = supabase_client.configured()
         available = False
         if configured:
@@ -1065,11 +1157,17 @@ class Handler(BaseHTTPRequestHandler):
                 available = supabase_client.tables_exist()
             except supabase_client.SupabaseError:
                 available = False
-        self._json({"ok": True, "configured": configured, "available": available})
+        self._json({"ok": True, "configured": configured, "available": available,
+                    "cloud_mode": False})
 
     def _handle_sync(self) -> None:
         user = self._ensure_login()
         if not user:
+            return
+        # 云模式：业务数据直连云端，没有本地库可同步，无同步对象
+        if config.storage_is_cloud():
+            self._json({"ok": True, "cloud_mode": True,
+                        "message": "当前为云模式：数据直连云端，无需同步"})
             return
         if not supabase_client.configured():
             self._error("未配置云端数据库：请在 .env 里填写 CLAW_SUPABASE_PROJECT_REF 与 CLAW_SUPABASE_TOKEN", 400)
@@ -1089,6 +1187,10 @@ class Handler(BaseHTTPRequestHandler):
         if payload is None:
             return
         user = self._current_user()
+        # 云模式：抓取需要本机代理/限速状态，本期禁用；请在本地模式设备抓取后同步
+        if config.storage_is_cloud():
+            self._error("云模式暂不支持抓取：请在本地模式设备抓取并同步", 400)
+            return
         service = self._scrape_service(user)
         try:
             state = service.start(
@@ -1110,9 +1212,12 @@ class Handler(BaseHTTPRequestHandler):
         if payload is None:
             return
         user = self._current_user()
-        updated = db.set_want_download(payload.get("ids", []),
-                                       bool(payload.get("want", False)),
-                                       self._user_db_path(user))
+        want = bool(payload.get("want", False))
+        if config.storage_is_cloud():
+            updated = self._cloud_mark(user, "want_download", payload.get("ids", []), want)
+        else:
+            updated = db.set_want_download(payload.get("ids", []), want,
+                                           self._user_db_path(user))
         self._json({"ok": True, "updated": updated})
 
     def _handle_hidden(self) -> None:
@@ -1120,10 +1225,36 @@ class Handler(BaseHTTPRequestHandler):
         if payload is None:
             return
         user = self._current_user()
-        updated = db.set_hidden(payload.get("ids", []),
-                                bool(payload.get("hidden", False)),
-                                self._user_db_path(user))
+        hidden = bool(payload.get("hidden", False))
+        if config.storage_is_cloud():
+            updated = self._cloud_mark(user, "hidden", payload.get("ids", []), hidden)
+        else:
+            updated = db.set_hidden(payload.get("ids", []), hidden,
+                                    self._user_db_path(user))
         self._json({"ok": True, "updated": updated})
+
+    def _handle_downloaded(self) -> None:
+        payload = self._read_json()
+        if payload is None:
+            return
+        user = self._current_user()
+        downloaded = bool(payload.get("downloaded", False))
+        if config.storage_is_cloud():
+            updated = self._cloud_mark(user, "downloaded", payload.get("ids", []), downloaded)
+        else:
+            updated = db.set_downloaded(payload.get("ids", []), downloaded,
+                                        self._user_db_path(user))
+        self._json({"ok": True, "updated": updated})
+
+    def _cloud_mark(self, user: dict, flag: str, ids, value: bool) -> int:
+        """云模式：把标记直接写进云端作品行（按当前用户隔离）。"""
+        username = user["username"]
+        try:
+            return supabase_client.cloud_mark_gallery_flags(username, ids,
+                                                            flag_col=flag, value=value)
+        except supabase_client.SupabaseError as exc:
+            self._error(str(exc), exc.status or 502)
+            return 0
 
     def _handle_favorites_sync(self) -> None:
         payload = self._read_json()
@@ -1162,16 +1293,6 @@ class Handler(BaseHTTPRequestHandler):
                 break
             page += 1
         self._json({"ok": True, "synced": synced, "pages": page})
-
-    def _handle_downloaded(self) -> None:
-        payload = self._read_json()
-        if payload is None:
-            return
-        user = self._current_user()
-        updated = db.set_downloaded(payload.get("ids", []),
-                                    bool(payload.get("downloaded", False)),
-                                    self._user_db_path(user))
-        self._json({"ok": True, "updated": updated})
 
     def _handle_download_url(self) -> None:
         payload = self._read_json()
@@ -1231,8 +1352,11 @@ class Handler(BaseHTTPRequestHandler):
         if batch_id <= 0:
             self._error("请先选择一个批次", 400)
             return
-        user_db = self._user_db_path(user)
-        targets = db.list_batch_targets(user_db, batch_id, skip_downloaded=not redownload)
+        if config.storage_is_cloud():
+            targets = self._cloud_batch_targets(user, batch_id, skip_downloaded=not redownload)
+        else:
+            user_db = self._user_db_path(user)
+            targets = db.list_batch_targets(user_db, batch_id, skip_downloaded=not redownload)
         if not targets:
             self._error("该批次没有需要下载的作品（可勾选「重新下载」忽略已下载标记）", 400)
             return
@@ -1240,7 +1364,7 @@ class Handler(BaseHTTPRequestHandler):
         result = self.server.download_queue.enqueue_many(
             targets, fmt, api_key=api_key, source="batch", batch_id=batch_id,
             username=username, origin=origin)
-        self._json({"ok": True, "queued": result["queued"], "total": result["total"],
+        self._json({"ok": True, "queued": result["queued"], "total": len(targets),
                     "queue": self._filtered_jobs(user)})
 
     def _handle_download_start(self) -> None:
@@ -1263,16 +1387,59 @@ class Handler(BaseHTTPRequestHandler):
             return
         fmt = str(payload.get("format") or "zip")
         redownload = bool(payload.get("redownload", False))
-        user_db = self._user_db_path(user)
-        targets = db.list_want_download_targets(user_db, skip_downloaded=not redownload)
+        if config.storage_is_cloud():
+            targets = self._cloud_want_targets(user, skip_downloaded=not redownload)
+        else:
+            user_db = self._user_db_path(user)
+            targets = db.list_want_download_targets(user_db, skip_downloaded=not redownload)
         if not targets:
             self._error("没有需要下载的作品（可勾选「重新下载」忽略已下载标记）", 400)
             return
         username = user.get("username", "") if user else ""
         result = self.server.download_queue.enqueue_many(
             targets, fmt, api_key=api_key, source="want", username=username, origin=origin)
-        self._json({"ok": True, "queued": result["queued"], "total": result["total"],
+        self._json({"ok": True, "queued": result["queued"], "total": len(targets),
                     "queue": self._filtered_jobs(user)})
+
+    def _cloud_want_targets(self, user: dict, *, skip_downloaded: bool) -> list[dict]:
+        """云模式：从云端作品行算「待下载」目标（组内任一 want_download 即命中，取推荐版本）。"""
+        rows = supabase_client.cloud_fetch_gallery_rows(user["username"])
+        rows = [dict(r) for r in rows if not r.get("hidden")]
+        if not rows:
+            return []
+        targets: list[dict] = []
+        for group in db._cluster_rows(rows, True):
+            if not any(r.get("want_download") for r in group):
+                continue
+            if skip_downloaded and any(r.get("downloaded") for r in group):
+                continue
+            ordered = sorted(group, key=lambda r: db._variant_rank(r, []))
+            main = ordered[0]
+            targets.append({
+                "gallery_id": int(main["gallery_id"]),
+                "title": (main.get("title_pretty") or main.get("title") or ""),
+            })
+        targets.sort(key=lambda t: -t["gallery_id"])
+        return targets
+
+    def _cloud_batch_targets(self, user: dict, batch_id: int, *, skip_downloaded: bool) -> list[dict]:
+        """云模式：从云端作品行算指定批次目标。"""
+        rows = [dict(r) for r in supabase_client.cloud_fetch_gallery_rows(user["username"])
+                if not r.get("hidden") and int(r.get("batch_id") or 0) == int(batch_id)]
+        if not rows:
+            return []
+        targets: list[dict] = []
+        for group in db._cluster_rows(rows, True):
+            if skip_downloaded and any(r.get("downloaded") for r in group):
+                continue
+            ordered = sorted(group, key=lambda r: db._variant_rank(r, []))
+            main = ordered[0]
+            targets.append({
+                "gallery_id": int(main["gallery_id"]),
+                "title": (main.get("title_pretty") or main.get("title") or ""),
+            })
+        targets.sort(key=lambda t: -t["gallery_id"])
+        return targets
 
     def _handle_download_enqueue(self) -> None:
         payload = self._read_json()

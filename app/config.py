@@ -106,6 +106,25 @@ SUPABASE_TIMEOUT = float(os.environ.get("CLAW_SUPABASE_TIMEOUT", "30") or 30)
 SUPABASE_TABLE_PREFIX = (os.environ.get("CLAW_SUPABASE_TABLE_PREFIX", "claw_") or "claw_").strip()
 # 同步单次最大行数（防止一次请求过大）
 SUPABASE_SYNC_MAX_ROWS = max(100, int(os.environ.get("CLAW_SUPABASE_SYNC_MAX_ROWS", "20000") or 20000))
+# Postgres 直连基址（预留）：当前传输层走 Management API（CLAW_SUPABASE_API_URL
+# + 账号级 PAT）。CLAW_SUPABASE_DB_URL 是未来若改用 psycopg 走 Postgres TCP
+# 时的项目基址（默认由 ref 推导 https://<ref>.supabase.co），暂未被使用。
+SUPABASE_DB_URL = (os.environ.get("CLAW_SUPABASE_DB_URL", "") or "").strip().rstrip("/")
+if not SUPABASE_DB_URL and SUPABASE_PROJECT_REF:
+    SUPABASE_DB_URL = f"https://{SUPABASE_PROJECT_REF}.supabase.co"
+
+# ---- 存储模式开关 ----
+# local（默认）：业务数据存本地 SQLite；注册写云端，「同步」按钮双向同步。
+# cloud（VPS 部署）：业务数据直接读写 Supabase，不落本地 SQLite；
+#   没有同步操作（数据本就在云端），账号注册/登录一律走云端。
+STORAGE_BACKEND = (os.environ.get("CLAW_STORAGE_BACKEND", "local") or "local").strip().lower()
+if STORAGE_BACKEND not in ("local", "cloud"):
+    STORAGE_BACKEND = "local"
+
+
+def storage_is_cloud() -> bool:
+    """当前部署是否为云模式（业务数据直连 Supabase，不写本地 SQLite）。"""
+    return STORAGE_BACKEND == "cloud"
 
 
 def supabase_configured() -> bool:
