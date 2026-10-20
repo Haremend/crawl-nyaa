@@ -7,11 +7,13 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import secrets
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -65,6 +67,8 @@ CREATE INDEX IF NOT EXISTS idx_galleries_last_seen ON galleries(last_seen);
 
 CREATE TABLE IF NOT EXISTS download_jobs (
     job_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    username     TEXT NOT NULL DEFAULT '',
+    origin       TEXT NOT NULL DEFAULT '',
     gallery_id   INTEGER NOT NULL,
     title        TEXT NOT NULL DEFAULT '',
     format       TEXT NOT NULL DEFAULT 'zip',
@@ -82,11 +86,31 @@ CREATE TABLE IF NOT EXISTS download_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON download_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_gallery ON download_jobs(gallery_id);
+-- 注意：idx_jobs_username 不放在 SCHEMA 里，否则旧库（download_jobs 还没有
+-- username 列）会在 executescript 阶段建索引失败；它在下面的迁移块里建。
 
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS users (
+    username      TEXT PRIMARY KEY,
+    password_hash TEXT NOT NULL,
+    salt          TEXT NOT NULL,
+    api_key       TEXT NOT NULL DEFAULT '',
+    site_origin   TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token      TEXT PRIMARY KEY,
+    username   TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_username ON sessions(username);
 
 CREATE TABLE IF NOT EXISTS scrape_runs (
     run_id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -231,6 +255,14 @@ def init_db(path: str | Path | None = None) -> None:
                 conn.execute("ALTER TABLE galleries DROP COLUMN favorite")
             except Exception:
                 pass  # 旧版 SQLite 不支持 DROP COLUMN 时保留该列，不影响使用
+        # download_jobs 多用户改造：老队列表补 username / origin 列
+        job_cols = {row[1] for row in conn.execute("PRAGMA table_info(download_jobs)")}
+        if "username" not in job_cols:
+            conn.execute("ALTER TABLE download_jobs ADD COLUMN username TEXT NOT NULL DEFAULT ''")
+        if "origin" not in job_cols:
+            conn.execute("ALTER TABLE download_jobs ADD COLUMN origin TEXT NOT NULL DEFAULT ''")
+        # 列补齐后再建索引（新库列已存在，旧库刚 ALTER 过），两条路径都不会失败
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_username ON download_jobs(username)")
         conn.commit()
     finally:
         conn.close()
@@ -1102,15 +1134,21 @@ def get_site_origin(path: str | Path | None = None) -> str:
 
 def create_job(gallery_id: int, *, title: str = "", fmt: str = "zip",
                source: str = "manual", batch_id: int | None = None,
+               username: str = "", origin: str = "",
                path: str | Path | None = None) -> int:
     """把一个下载任务放进队列，返回 job_id。
 
     同一个作品 + 同一个格式，如果已经在队列里（queued/running），直接复用，避免重复排队。
+
+    任务行里保存 username / origin，worker 用它们找到该用户的库与站点地址；
+    API Key 不落库，只在队列进程内存里跟着任务走。
     """
     gid = _optional_int(gallery_id) or 0
     if gid <= 0:
         raise ValueError("无效的 gallery_id")
     now = utc_now()
+    name = (username or "").strip()
+    org = (origin or "").strip()
     with _WRITE_LOCK:
         conn = connect(path)
         try:
@@ -1122,9 +1160,9 @@ def create_job(gallery_id: int, *, title: str = "", fmt: str = "zip",
             if existing:
                 return int(existing[0])
             cursor = conn.execute(
-                "INSERT INTO download_jobs (gallery_id, title, format, source, batch_id, "
-                "status, created_at) VALUES (?, ?, ?, ?, ?, 'queued', ?)",
-                (gid, title or "", fmt, source, batch_id, now),
+                "INSERT INTO download_jobs (username, origin, gallery_id, title, format, "
+                "source, batch_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
+                (name, org, gid, title or "", fmt, source, batch_id, now),
             )
             conn.commit()
             return int(cursor.lastrowid)
@@ -1456,3 +1494,365 @@ def reset_all(path: str | Path | None = None) -> dict:
         return {"galleries": int(galleries), "runs": int(runs)}
     finally:
         conn.close()
+
+# ============================================================
+# 多用户：账号、会话与用户独立数据文件
+# ============================================================
+
+def user_db_path(username: str, base_dir=None):
+    """每个登录用户一份独立 SQLite：data/users/<username>.sqlite3。
+
+    这样现有所有 db.* 函数（都以 path 参数运行）可以原样复用，
+    不同用户的爬取数据天然隔离；users/sessions 表则始终在默认库里。
+    """
+    name = (username or "").strip()
+    if not name:
+        return Path(config.DB_PATH)
+    safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in name).strip("._")
+    safe = safe or "user"
+    root = Path(base_dir) if base_dir is not None else Path(config.DATA_DIR)
+    return root / "users" / f"{safe}.sqlite3"
+
+
+def hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
+    """PBKDF2-SHA256 哈希；返回 (salt, hex_digest)。"""
+    salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt.encode("ascii"), 120_000
+    ).hex()
+    return salt, digest
+
+
+def register_user(username: str, password: str, *, api_key: str = "",
+                  site_origin: str = "", path: str | Path | None = None) -> str | None:
+    """创建用户；用户名已存在返回 None；参数不合法抛 ValueError。"""
+    name = (username or "").strip()
+    if not (3 <= len(name) <= 64):
+        raise ValueError("用户名长度需在 3-64 个字符之间")
+    if not password or len(password) < 4:
+        raise ValueError("密码至少 4 位")
+    salt, digest = hash_password(password)
+    now = utc_now()
+    with _WRITE_LOCK:
+        conn = connect(path)
+        try:
+            try:
+                conn.execute(
+                    "INSERT INTO users (username, password_hash, salt, api_key, site_origin, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (name, digest, salt, (api_key or "").strip(), (site_origin or "").strip(), now),
+                )
+                conn.commit()
+                return name
+            except sqlite3.IntegrityError:
+                return None
+        finally:
+            conn.close()
+
+
+def verify_user(username: str, password: str, path: str | Path | None = None) -> bool:
+    name = (username or "").strip()
+    if not name:
+        return False
+    conn = connect(path)
+    try:
+        row = conn.execute(
+            "SELECT salt, password_hash FROM users WHERE username = ?", (name,)
+        ).fetchone()
+        if not row:
+            return False
+        _, digest = hash_password(password, str(row["salt"]))
+        return secrets.compare_digest(digest, str(row["password_hash"]))
+    finally:
+        conn.close()
+
+
+def create_session(username: str, path: str | Path | None = None,
+                   ttl_hours: int | None = None) -> str:
+    """为用户创建会话 token；同一用户旧会话被清理。"""
+    ttl = int(ttl_hours if ttl_hours is not None else config.SESSION_TTL_HOURS)
+    token = secrets.token_urlsafe(32)
+    now = utc_now()
+    expires = (datetime.now(timezone.utc) + timedelta(hours=ttl)).isoformat(timespec="seconds")
+    with _WRITE_LOCK:
+        conn = connect(path)
+        try:
+            conn.execute("DELETE FROM sessions WHERE username = ? OR expires_at <= ?", (username, now))
+            conn.execute(
+                "INSERT INTO sessions (token, username, created_at, expires_at) VALUES (?, ?, ?, ?)",
+                (token, username, now, expires),
+            )
+            conn.commit()
+            return token
+        finally:
+            conn.close()
+
+
+def get_user_by_session(token: str, path: str | Path | None = None) -> dict | None:
+    """按会话 token 取用户安全视图（不含密码字段）；过期/不存在返回 None。"""
+    token = (token or "").strip()
+    if not token:
+        return None
+    conn = connect(path)
+    try:
+        row = conn.execute(
+            "SELECT s.username, u.api_key, u.site_origin, u.created_at "
+            "FROM sessions s JOIN users u ON u.username = s.username "
+            "WHERE s.token = ? AND s.expires_at > ?",
+            (token, utc_now()),
+        ).fetchone()
+        if not row:
+            return None
+        return {"username": str(row["username"]), "api_key": str(row["api_key"] or ""),
+                "site_origin": str(row["site_origin"] or ""), "created_at": str(row["created_at"] or "")}
+    finally:
+        conn.close()
+
+
+def get_user(username: str, path: str | Path | None = None) -> dict | None:
+    conn = connect(path)
+    try:
+        row = conn.execute(
+            "SELECT username, api_key, site_origin, created_at FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        if not row:
+            return None
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def update_user_settings(username: str, *, api_key: str | None = None,
+                         site_origin: str | None = None,
+                         path: str | Path | None = None) -> None:
+    updates: list[str] = []
+    params: list[Any] = []
+    if api_key is not None:
+        updates.append("api_key = ?")
+        params.append(str(api_key).strip())
+    if site_origin is not None:
+        updates.append("site_origin = ?")
+        params.append(str(site_origin).strip())
+    if not updates:
+        return
+    params.append(username)
+    with _WRITE_LOCK:
+        conn = connect(path)
+        try:
+            conn.execute(f"UPDATE users SET {', '.join(updates)} WHERE username = ?", params)
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def delete_session(token: str, path: str | Path | None = None) -> bool:
+    token = (token or "").strip()
+    if not token:
+        return False
+    with _WRITE_LOCK:
+        conn = connect(path)
+        try:
+            cur = conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
+# ============================================================
+# 云端同步用的全量行导出 / 合并写入
+# ============================================================
+
+_GALLERY_COLUMNS = [
+    "gallery_id", "media_id", "title", "title_pretty", "title_original", "title_key",
+    "original_key", "url", "thumbnail", "languages", "primary_language", "tags", "artists",
+    "groups", "parodies", "characters", "categories", "cover_file", "cover_fetched_at",
+    "scanlator", "uncensored", "want_download", "downloaded", "downloaded_at", "hidden",
+    "site_favorite", "from_scrape", "batch_id", "num_pages", "num_favorites", "upload_date",
+    "source_url", "detail_fetched_at", "first_seen", "last_seen",
+]
+
+# 同步时不参与「新者胜」判断的本地状态字段（云端数据不覆盖这些本地标记）
+_GALLERY_INT_COLUMNS = (
+    "media_id", "uncensored", "want_download", "downloaded", "hidden",
+    "site_favorite", "from_scrape", "batch_id", "num_pages", "num_favorites",
+)
+
+_RUN_COLUMNS = ["url", "status", "started_at", "finished_at", "pages_total", "pages_done",
+                "items_seen", "items_new", "items_dup", "error"]
+
+_RUN_INT_COLUMNS = ("pages_total", "pages_done", "items_seen", "items_new", "items_dup")
+
+
+def columns_for(table: str) -> list[str]:
+    """同步用的列清单（galleries / scrape_runs）。"""
+    return _GALLERY_COLUMNS if table == "galleries" else _RUN_COLUMNS
+
+
+def int_columns_for(table: str) -> tuple:
+    return _GALLERY_INT_COLUMNS if table == "galleries" else _RUN_INT_COLUMNS
+
+
+def all_gallery_rows(path: str | Path | None = None) -> list[dict]:
+    conn = connect(path)
+    try:
+        return [dict(row) for row in conn.execute("SELECT * FROM galleries").fetchall()]
+    finally:
+        conn.close()
+
+
+def all_run_rows(path: str | Path | None = None) -> list[dict]:
+    conn = connect(path)
+    try:
+        return [dict(row) for row in conn.execute("SELECT * FROM scrape_runs").fetchall()]
+    finally:
+        conn.close()
+
+
+def row_updated_at(row: dict, table: str) -> str:
+    """同步用的「最后修改时间」：作品用 last_seen，批次用 finished_at/started_at。"""
+    if table == "galleries":
+        return str(row.get("last_seen") or "")
+    return str(row.get("finished_at") or row.get("started_at") or "")
+
+
+def upsert_gallery_rows_from_cloud(rows: Iterable[dict], path: str | Path | None = None) -> int:
+    """把云端作品行合并进本地：主键 gallery_id，last_seen 更新者胜。
+
+    返回本次处理的云端行数（合并 = 插入或更新到更新者胜）。
+    云端与本地时间戳格式一致（ISO-8601 UTC），因此可以直接做字符串比较。
+    用「处理的行数」而不是 cursor.rowcount，因为 SQLite 的 executemany
+    对 ON CONFLICT...WHERE 的 rowcount 报告不可靠（常报 0/-1）。
+    """
+    items = [r for r in rows if _optional_int(r.get("gallery_id"))]
+    if not items:
+        return 0
+    cols = ", ".join(_GALLERY_COLUMNS)
+    marks = ", ".join("?" for _ in _GALLERY_COLUMNS)
+    updates = ", ".join(f"{c} = excluded.{c}" for c in _GALLERY_COLUMNS if c != "gallery_id")
+    sql = (
+        f"INSERT INTO galleries ({cols}) VALUES ({marks}) "
+        f"ON CONFLICT(gallery_id) DO UPDATE SET {updates} "
+        f"WHERE excluded.last_seen > galleries.last_seen"
+    )
+    with _WRITE_LOCK:
+        conn = connect(path)
+        try:
+            conn.executemany(sql, [
+                tuple(_optional_int(r.get(c)) if c in _GALLERY_INT_COLUMNS else r.get(c)
+                      for c in _GALLERY_COLUMNS)
+                for r in items
+            ])
+            conn.commit()
+        finally:
+            conn.close()
+    return len(items)
+
+
+def upsert_run_rows_from_cloud(rows: Iterable[dict], path: str | Path | None = None) -> int:
+    """把云端批次行合并进本地：按 url 归并，时间较新者胜，返回改动行数。
+
+    `scrape_runs` 没有 url 唯一约束（历史库中同一地址可能残留多条批次），
+    所以这里逐条比对而不是依赖 ON CONFLICT。云端行可携带 run_id：
+    本地还没有该 url 时按原 run_id 落库，保证 galleries.batch_id 的关联仍然成立；
+    若该 run_id 已被别的地址占用，则改用自增 id，并把指向旧 id 的作品改指过来。
+    """
+    items = [r for r in rows if str(r.get("url") or "").strip()]
+    if not items:
+        return 0
+    changed = 0
+    with _WRITE_LOCK:
+        conn = connect(path)
+        try:
+            for r in items:
+                url = str(r.get("url") or "").strip()
+                cloud_ts = str(r.get("finished_at") or r.get("started_at") or "")
+                row = conn.execute(
+                    "SELECT run_id, started_at, finished_at FROM scrape_runs "
+                    "WHERE url = ? ORDER BY run_id DESC LIMIT 1",
+                    (url,),
+                ).fetchone()
+                values = (
+                    str(r.get("status") or ""),
+                    str(r.get("started_at") or ""),
+                    str(r.get("finished_at") or "") or None,
+                    int(r.get("pages_total") or 0),
+                    int(r.get("pages_done") or 0),
+                    int(r.get("items_seen") or 0),
+                    int(r.get("items_new") or 0),
+                    int(r.get("items_dup") or 0),
+                    r.get("error"),
+                )
+                if row is None:
+                    run_id = _optional_int(r.get("run_id"))
+                    remap_from = run_id
+                    if run_id is not None and conn.execute(
+                        "SELECT 1 FROM scrape_runs WHERE run_id = ?", (run_id,)
+                    ).fetchone():
+                        run_id = None
+                    cur = conn.execute(
+                        "INSERT INTO scrape_runs (run_id, url, status, started_at, finished_at,"
+                        " pages_total, pages_done, items_seen, items_new, items_dup, error)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (run_id, url) + values,
+                    )
+                    if run_id is None and remap_from is not None:
+                        # 原 run_id 被占用：把引用它的作品改指到新插入的批次
+                        conn.execute("UPDATE galleries SET batch_id = ? WHERE batch_id = ?",
+                                     (int(cur.lastrowid), int(remap_from)))
+                    changed += 1
+                else:
+                    local_ts = str(row["finished_at"] or row["started_at"] or "")
+                    if cloud_ts and cloud_ts > local_ts:
+                        conn.execute(
+                            "UPDATE scrape_runs SET status = ?, started_at = ?, finished_at = ?,"
+                            " pages_total = ?, pages_done = ?, items_seen = ?, items_new = ?,"
+                            " items_dup = ?, error = ? WHERE run_id = ?",
+                            values + (int(row["run_id"]),),
+                        )
+                        changed += 1
+            conn.commit()
+        finally:
+            conn.close()
+    return changed
+
+
+# ============================================================
+# 多用户辅助：用户库列表与跨库标记
+# ============================================================
+
+def list_usernames(path: str | Path | None = None) -> list[str]:
+    """默认库里注册的全部用户名（用于跨用户库操作，例如标记已下载）。"""
+    conn = connect(path)
+    try:
+        return [str(row["username"]) for row in conn.execute(
+            "SELECT username FROM users ORDER BY username").fetchall()]
+    finally:
+        conn.close()
+
+
+def iter_user_db_paths(path: str | Path | None = None) -> list:
+    """所有用户独立库的路径（不保证存在，调用方需自行判断）。"""
+    return [user_db_path(name) for name in list_usernames(path)]
+
+
+def mark_downloaded_all(gallery_id: int, path: str | Path | None = None) -> int:
+    """把某个作品在所有库（默认库 + 每个用户库）里标记为已下载。
+
+    文件在服务器上只存一份，因此「已下载」是全局事实：任何用户触发下载后，
+    其他持有同一作品的用户也应该看到「已下载」。
+    """
+    gid = _optional_int(gallery_id)
+    if not gid:
+        return 0
+    targets = [path or config.DB_PATH] + iter_user_db_paths(path)
+    changed = 0
+    for target in targets:
+        try:
+            if not Path(target).exists():
+                continue
+            changed += set_downloaded([gid], True, target)
+        except sqlite3.Error:
+            continue
+    return changed

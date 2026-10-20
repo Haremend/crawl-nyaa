@@ -73,11 +73,16 @@ class DownloadQueue:
     # ---------- 入队 ----------
     def enqueue(self, gallery_id: int, fmt: str = "zip", *, api_key: str = "",
                 source: str = "manual", batch_id: int | None = None,
-                title: str = "") -> dict:
+                title: str = "", username: str = "", origin: str = "") -> dict:
         fmt = fmt if fmt in ("zip", "cbz", "torrent") else "zip"
-        resolved_title = title or db.get_title(gallery_id, self.db_path)
+        name = (username or "").strip()
+        org = (origin or "").strip()
+        # 标题用于生成合规文件名；若调用方没传，按用户库取（没用户就退回默认库）
+        user_db = db.user_db_path(name) if name else self.db_path
+        resolved_title = title or db.get_title(gallery_id, user_db)
         job_id = db.create_job(gallery_id, title=resolved_title, fmt=fmt,
-                               source=source, batch_id=batch_id, path=self.db_path)
+                               source=source, batch_id=batch_id, username=name,
+                               origin=org, path=self.db_path)
         with self._lock:
             if api_key:
                 self._keys[job_id] = api_key
@@ -86,14 +91,16 @@ class DownloadQueue:
         return db.get_job(job_id, self.db_path) or {}
 
     def enqueue_many(self, items, fmt: str = "zip", *, api_key: str = "",
-                     source: str = "batch", batch_id: int | None = None) -> dict:
+                     source: str = "batch", batch_id: int | None = None,
+                     username: str = "", origin: str = "") -> dict:
         queued = 0
         for item in items:
             gid = int(item.get("gallery_id") or 0)
             if gid <= 0:
                 continue
             self.enqueue(gid, fmt, api_key=api_key, source=source,
-                         batch_id=batch_id, title=str(item.get("title") or ""))
+                         batch_id=batch_id, title=str(item.get("title") or ""),
+                         username=username, origin=origin)
             queued += 1
         self.start()
         return {"queued": queued, "total": len(items)}
@@ -168,9 +175,17 @@ class DownloadQueue:
         gallery_id = int(job["gallery_id"])
         fmt = str(job.get("format") or "zip")
         title = str(job.get("title") or "")
+        username = str(job.get("username") or "").strip()
+        # 任务绑定的站点地址：入队时已经按当前用户解析好写进任务行，
+        # 这样 worker 不再依赖 download_jobs 库里的站点设置（那是实例级共享库）
+        origin = str(job.get("origin") or "").strip()
         with self._lock:
             event = self._events.setdefault(job_id, threading.Event())
             api_key = self._keys.get(job_id, "")
+
+        # 完成后的「已下载」标记要落在该用户的库；文件全局共享，
+        # 其它用户以后触发同一作品时也会命中并标记自己的库。
+        user_db = db.user_db_path(username) if username else self.db_path
 
         if event.is_set():
             db.update_job(job_id, path=self.db_path, status="cancelled",
@@ -182,10 +197,12 @@ class DownloadQueue:
                           finished_at=db.utc_now())
             return
 
-        origin = db.get_site_origin(self.db_path)
+        if not origin:
+            # 兼容老任务行（没有 origin）：回退到用户库的站点设置
+            origin = db.get_site_origin(user_db)
         if not origin:
             db.update_job(job_id, path=self.db_path, status="failed",
-                          error="未知站点地址：请先在门禁里填写站点域名",
+                          error="未知站点地址：请先在设置里填写站点域名",
                           finished_at=db.utc_now())
             return
 
@@ -202,7 +219,8 @@ class DownloadQueue:
             size = existing.stat().st_size
             db.update_job(job_id, path=self.db_path, status="done", file_path=str(existing),
                           total_bytes=size, done_bytes=size, finished_at=db.utc_now())
-            db.set_downloaded([gallery_id], True, self.db_path)
+            # 文件已存在：直接命中，按当前用户标记已下载（不替其他用户写状态）
+            db.set_downloaded([gallery_id], True, user_db)
             return
 
         try:
@@ -271,11 +289,13 @@ class DownloadQueue:
         db.update_job(job_id, path=self.db_path, status="done", file_path=str(target),
                       total_bytes=total or done_bytes, done_bytes=done_bytes,
                       finished_at=db.utc_now())
-        db.set_downloaded([gallery_id], True, self.db_path)
+        # 文件在服务器上只存一份：当前用户标记自己的库即可，
+        # 其它用户以后触发同一作品时会命中磁盘文件并标记自己的库。
+        db.set_downloaded([gallery_id], True, user_db)
         if str(job.get("source") or "") == "batch" and batch_id:
-            self._write_batch_manifest(int(batch_id), download_dir)
+            self._write_batch_manifest(int(batch_id), download_dir, user_db)
 
-    def _write_batch_manifest(self, batch_id: int, directory: Path) -> None:
+    def _write_batch_manifest(self, batch_id: int, directory: Path, user_db) -> None:
         """在批次目录里写清单（JSON + CSV），记录来源与作品列表。"""
         import csv
         import json as _json
@@ -284,13 +304,13 @@ class DownloadQueue:
             items = []
             page = 1
             while True:
-                data = db.query_works(path=self.db_path, batch_id=batch_id,
+                data = db.query_works(path=user_db, batch_id=batch_id,
                                       sort="priority", page=page, per_page=200)
                 items.extend(data.get("items") or [])
                 if page >= data.get("pages", 1):
                     break
                 page += 1
-            run = next((b for b in db.list_batches(self.db_path)
+            run = next((b for b in db.list_batches(user_db)
                         if int(b["run_id"]) == int(batch_id)), {})
             manifest = {
                 "batch_id": batch_id,

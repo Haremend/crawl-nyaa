@@ -1,7 +1,8 @@
 # AGENTS.md
 
 > 给在本仓库工作的 AI Agent（以及人类协作者）的项目约束与说明。
-> **动手改代码之前先把本文读完**，尤其是「1. 硬性约束」和「7. 已知的坑」。
+> 会话压缩、重启或换 Agent 后，先按顺序阅读：`需求基线.md` → `功能清单.md` → `详细设计.md` → 本文 → `.env.example` → `README.md`。
+> **动手改代码之前先读 `需求基线.md` 和本文**，尤其是「1. 硬性约束」「4. 业务规则」「7. 已知的坑」和「10. 多用户与云端同步约束」。
 
 ---
 
@@ -37,9 +38,12 @@
 
 - `data/`（SQLite）、`cover/`（封面）、`download/`（下载产物）、`.test-tmp/` 已在 `.gitignore` 中，
   **不要移除这些规则，也不要用 `git add -f` 绕过**
-- ❌ **API Key、cookie、session token 绝不写入**：代码、配置文件、日志、数据库、测试、提交
-- ✅ Key 只允许在**单次请求 / 单个任务的生命周期**内存在（参考 `app/upstream.py` 的设计）
-- ✅ 接收 Key 的接口只从请求头 `X-API-Key`（或 `?apikey=`）读取，**用完即弃**
+- ❌ **公开仓库和生产日志绝不能包含** API Key、cookie、session token、Supabase 管理 token；代码、文档、测试、示例、提交内容都必须清理
+- ✅ 匿名模式的 Key 只允许在**单次请求 / 单个任务生命周期**内存在（参考 `app/upstream.py` 的设计）
+- ✅ 登录用户的凭据表是**唯一允许持久化 API Key 的数据库位置**：仅用于跨设备登录和后续调用上游接口；不得回显完整值，不得写日志、异常、接口响应、页面 HTML、测试输出或 Git
+- ✅ 所有请求仍然通过请求头 `X-API-Key`（或 `?apikey=`）把临时 Key 传给后端；服务端解析顺序为「显式请求 Key → 当前登录用户保存值 → 匿名门禁值」
+- ✅ 前端只显示“已保存/未保存”状态，不能从接口读取或显示完整 Key
+- ✅ 提交只包含相关源码、测试和文档；`tmp_*`、探针脚本、服务进程、数据库、封面、下载文件和个人配置不得混入提交
 
 ### 1.3 零第三方依赖
 
@@ -60,11 +64,11 @@
 
 代码里**不得写入固定域名**。站点地址按以下顺序解析（`db.get_site_origin()`）：
 
-1. 前端门禁里填写的域名（`settings.site_origin`）
+1. 当前登录用户的设置，或未登录兼容门禁里填写的域名（`settings.site_origin`）
 2. 环境变量 `CLAW_API_ORIGIN`
 3. 最近一次抓取的列表页 URL / 库内作品链接推导
 
-抓取时会把推导出的地址同步回设置，保证与前端填写的一致。
+抓取时会把推导出的地址同步回设置，保证与前端填写的一致。公开接口和需要 Key 的接口共用这一解析顺序，但只有后者带 Key。
 
 ### 1.6 下载必须走后端转发，文件名必须净化
 
@@ -96,7 +100,7 @@
   N 个 worker 并发消费（N = `CLAW_DOWNLOAD_CONCURRENCY`，默认 5）
 - 队列在数据库里 → 任何标签页看到的是同一份；**不要把进度只放在某个请求的内存里**
 - 进度写库有节流（`PROGRESS_INTERVAL`），避免每个 64KB chunk 都写一次 SQLite
-- **API Key 只在队列进程的内存里**（`_keys`），不写数据库；服务重启后未完成任务会失败，需重新入队
+- **API Key 只在队列进程的内存里**（`_keys`），`download_jobs` 不保存 Key；登录用户的 Key 可在受控凭据表持久化，但队列任务本身不得落盘。服务重启后未完成任务会失败，需重新入队
 - 入队用 `create_job()`：同一作品 + 同一格式的排队/运行中任务会自动去重
 - 批次来源的任务（`source="batch"`）落到 `download/batch_<id>/` 并写 `manifest.json` / `works.csv`
 
@@ -125,7 +129,8 @@
 | `app/service.py` | 抓取任务管理（后台线程、进度、取消） | 锁必须是 `RLock` |
 | `app/covers.py` | 封面下载到 `cover/` | 文件名 = `<gallery_id>.<ext>` |
 | `app/downloader.py` | 批量下载服务（待下载 / 整批保存） | 支持服务器保存与清单写入 |
-| `app/server.py` | 内置 HTTP 服务（静态资源 + JSON API） | 路由与 Key 读取都在这里 |
+| `app/server.py` | 内置 HTTP 服务（静态资源 + JSON API） | 路由、当前用户解析与 Key 读取都在这里 |
+| `app/supabase_client.py` | Supabase 管理 API 客户端与按用户同步 | 只从环境读取 token；表名/DDL/RLS 必须与线上迁移一致 |
 | `app/demo.py` | 演示数据（离线预览前端） | 只用 `samples/` 里的虚构样本 |
 | `web/` | 前端（`index.html` / `app.js` / `style.css`） | 无构建，直接由后端托管 |
 
@@ -134,6 +139,8 @@
 ## 3. 数据模型与迁移
 
 - SQLite，`WAL` 模式；每次操作**独立连接**（配合线程使用）
+- 默认账号库保存 `users` / `sessions`；登录用户业务数据写入 `data/users/<安全用户名>.sqlite3`，匿名模式仍使用默认库
+- 云端 `claw_users` / `claw_galleries` / `claw_scrape_runs` 以 `username` 做租户隔离；公开 schema 表必须启用 RLS 并撤销 `anon` / `authenticated` 权限
 - **加字段必须同时改两处**：`SCHEMA`（新库）与 `MIGRATIONS`（老库升级）
   —— 迁移必须是**幂等**的，老库升级后数据不能丢
 - 语义约束：
@@ -274,11 +281,11 @@ node --check web/app.js
 - [ ] 残留扫描无命中（非保留域名 / 密钥特征 / 品牌词）：
 
 ```bash
-# 1) 不应出现非保留域名（只允许 example.net / localhost / 127.0.0.1）
+# 1) 不应出现非保留域名（允许 example.net / example.com / example.org / localhost / 127.0.0.1 / api.supabase.com）
 grep -rnoE 'https?://[A-Za-z0-9.-]+' --include='*.py' --include='*.js' \
   --include='*.html' --include='*.css' --include='*.md' --include='*.json' \
   --exclude-dir={data,cover,download,.test-tmp,.git} . \
-  | grep -viE 'example\.(net|com|org)|localhost|127\.0\.0\.1' \
+  | grep -viE 'example\.(net|com|org)|localhost|127\.0\.0\.1|api\.supabase\.com' \
   || echo "无非保留域名"
 
 # 2) 不应出现密钥样式字符串（<前缀>_<长随机串>）
@@ -294,3 +301,58 @@ grep -rnoE '[A-Za-z]{2,6}_[A-Za-z0-9_-]{24,}' --include='*.py' --include='*.js' 
 - [ ] `git status` 里**没有** `data/` `cover/` `download/` 下的文件
 - [ ] 没有把 Key / cookie 写进任何被提交的文件
 - [ ] 涉及站点地址的代码仍然只从「用户输入 URL」或 `CLAW_API_ORIGIN` 取值
+---
+
+## 10. 多用户与云端同步约束（2026-10-20）
+
+> 需求语义、接口目标、验收清单以 [`需求基线.md`](需求基线.md) 为准；本节是 Agent 动手时的硬约束。
+
+### 10.1 当前用户是一等上下文
+
+- 所有业务接口必须从会话 cookie 解析当前用户，不能相信请求体中的 `username`。
+- 登录用户使用自己的 SQLite；匿名模式保留默认库兼容路径。
+- 作品、批次、站点收藏、待下载、已下载、隐藏、下载目标都必须按当前用户隔离。
+- 新增业务路由时，先确定：当前用户是谁、数据库路径是什么、站点 origin/API Key 从哪里来；落空不得回退到其他用户或默认账号库。
+
+### 10.2 Supabase 只做后端副本
+
+- 前端不连接 Supabase，不接触管理 token。
+- 云端表必须有 `username` 复合键；云端行合并时不得跨用户。
+- 同步默认流程是「拉云端 → 合并本地 → 推回云端」；本地模式无云端配置也必须能工作。
+- 云端不可用时要返回可读错误，不得清空本地数据。
+- `download_jobs` 属于运行时队列，默认不参与跨部署记录同步；下载文件可以跨用户复用，但数据库标记要按用户维护。
+
+### 10.3 正常抓取依然不覆盖
+
+- `upsert_items()` 对已存在的 `gallery_id` 保持“跳过内容更新，只刷新 `last_seen`”的语义。
+- 同步合并是单独路径，可以按明确的时间/状态规则合并；不要把同步逻辑混入正常抓取入库函数。
+- `hidden = 1` 的作品仍参与“已收录”判断，不能被重抓重新插入。
+
+### 10.4 凭据与日志
+
+- API Key、Supabase token、cookie、session 不得出现在任何日志、异常字符串、调试输出、接口 JSON 或前端文本中。
+- 用户设置接口只能返回 `has_api_key` 类似字段，不能返回 key 本身。
+- 测试使用伪造 Key、伪造 token；不得使用真实凭据。
+
+### 10.5 完成定义
+
+一个功能只有在以下条件全部满足时才能标为完成：
+
+1. 代码、前端和迁移都已落地；
+2. 有离线测试覆盖关键路径；
+3. `python -m unittest discover -s tests -q` 全绿；
+4. `node --check web/app.js` 通过；
+5. 已做残留扫描（来源标识、真实数据、Key/token/cookie）；
+6. `功能清单.md` 和 `详细设计.md` 已更新测试日期。
+
+### 10.6 代理是实例级设置
+
+- 代理开关只影响当前部署实例的后端出网，不是用户的云端账号设置，也不参与同步。
+- 关闭代理时必须真正直连，新增出网代码统一走 `Fetcher()`；不得重新从 `config.PROXY` 单独拼代理。
+- 多用户共享实例时，任何代理切换都不得导致 API Key、cookie 或请求参数进入日志。
+
+### 10.7 收尾与后台进程
+
+- 完成任务后停止本次启动的 HTTP 服务、抓取线程和下载队列；不要让后台进程持续占用端口或继续出网。
+- 临时探针、诊断脚本和测试产物要删除或放入已忽略目录，不得混入提交。
+- 若必须留下运行中的服务，最终答复要明确进程、端口、目的和停止方式。

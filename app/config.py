@@ -89,6 +89,29 @@ INSECURE_TLS = os.environ.get("CLAW_INSECURE_TLS", "").lower() in {"1", "true", 
 HOST = os.environ.get("CLAW_HOST", "127.0.0.1")
 PORT = int(os.environ.get("CLAW_PORT", "8787"))
 
+# ---- 多用户 / 会话 ----
+# 登录会话有效期（小时），默认 30 天
+SESSION_TTL_HOURS = max(1, int(os.environ.get("CLAW_SESSION_TTL_HOURS", "720") or 720))
+# 登录用户的独立 SQLite 目录：data/users/<用户名>.sqlite3
+USER_DATA_DIR = Path(os.environ.get("CLAW_USER_DATA_DIR", DATA_DIR / "users"))
+
+# ---- 云端数据库（Supabase，可选）----
+# .env 默认不启用云端：留空 project_ref / token 即纯本地模式。
+# 启用后「数据同步」按钮才会真正读写云端，业务数据本身仍然以本地 SQLite 为准。
+SUPABASE_API_URL = (os.environ.get("CLAW_SUPABASE_API_URL", "") or "https://api.supabase.com").strip().rstrip("/")
+SUPABASE_PROJECT_REF = (os.environ.get("CLAW_SUPABASE_PROJECT_REF", "") or "").strip()
+SUPABASE_TOKEN = (os.environ.get("CLAW_SUPABASE_TOKEN", "") or "").strip()
+SUPABASE_TIMEOUT = float(os.environ.get("CLAW_SUPABASE_TIMEOUT", "30") or 30)
+# 云端表名前缀，避免和项目里已有的表冲突
+SUPABASE_TABLE_PREFIX = (os.environ.get("CLAW_SUPABASE_TABLE_PREFIX", "claw_") or "claw_").strip()
+# 同步单次最大行数（防止一次请求过大）
+SUPABASE_SYNC_MAX_ROWS = max(100, int(os.environ.get("CLAW_SUPABASE_SYNC_MAX_ROWS", "20000") or 20000))
+
+
+def supabase_configured() -> bool:
+    """是否具备读写云端数据库的最小配置。"""
+    return bool(SUPABASE_PROJECT_REF and SUPABASE_TOKEN)
+
 THUMB_MAX_BYTES = 8 * 1024 * 1024
 EXPORT_MAX_ROWS = 20000
 

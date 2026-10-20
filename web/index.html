@@ -52,6 +52,10 @@
     <button class="meta-chip meta-btn" id="proxyBtn" title="切换是否通过本地代理访问（云服务器可关闭直连）">代理：开</button>
     <button class="meta-chip meta-btn" id="changeKeyBtn" title="清除浏览器里保存的 API Key 并重新输入">更换 Key</button>
   </div>
+  <div class="auth-area" id="authArea">
+    <!-- 未登录：登录/注册按钮；已登录：用户名 + 设置 + 同步 + 退出 -->
+    <button class="btn primary" id="loginBtn">登录 / 注册</button>
+  </div>
 </header>
 
 <main>
@@ -243,6 +247,77 @@
 </div>
 
 <div id="toast" class="toast" hidden></div>
+
+<!-- ============ 登录 / 注册弹窗 ============ -->
+<div class="modal" id="authModal" hidden>
+  <div class="modal-card">
+    <div class="modal-head">
+      <div class="modal-tabs">
+        <button class="modal-tab active" data-auth-tab="login">登录</button>
+        <button class="modal-tab" data-auth-tab="register">注册</button>
+      </div>
+      <button class="modal-close" id="authClose" title="关闭">×</button>
+    </div>
+    <div class="modal-body">
+      <label class="field">
+        <span>用户名</span>
+        <input id="authUsername" type="text" autocomplete="username" placeholder="3-64 个字符">
+      </label>
+      <label class="field">
+        <span>密码</span>
+        <input id="authPassword" type="password" autocomplete="current-password" placeholder="至少 4 位">
+      </label>
+      <div class="auth-extra" id="authExtra" hidden>
+        <label class="field">
+          <span>站点域名（可选）</span>
+          <input id="authSite" type="text" spellcheck="false" placeholder="例如 example.com">
+        </label>
+        <label class="field">
+          <span>API Key（可选，登录后可在设置里补）</span>
+          <input id="authKey" type="password" spellcheck="false" placeholder="留空则稍后在设置里填写">
+        </label>
+      </div>
+      <p class="modal-hint" id="authHint">登录后你的站点域名与 API Key 会跟账号走，不同设备登录无需重输。</p>
+      <div class="modal-actions">
+        <button class="btn primary" id="authSubmit">登录</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 用户设置弹窗 ============ -->
+<div class="modal" id="settingsModal" hidden>
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2 class="modal-title">用户设置</h2>
+      <button class="modal-close" id="settingsClose" title="关闭">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="modal-hint">登录用户：<b id="settingsUsername"></b></p>
+      <label class="field">
+        <span>站点域名</span>
+        <input id="settingsSite" type="text" spellcheck="false" placeholder="例如 example.com">
+      </label>
+      <label class="field">
+        <span>API Key（留空表示不修改已保存的 Key）</span>
+        <input id="settingsKey" type="password" spellcheck="false" placeholder="已保存的 Key 不回显，填了才覆盖">
+      </label>
+      <div class="modal-actions">
+        <button class="btn primary" id="settingsSave">保存</button>
+      </div>
+      <hr class="modal-sep">
+      <div class="sync-row">
+        <div>
+          <strong>数据同步</strong>
+          <p class="modal-hint" id="syncStatusText">未配置云端：在 .env 里填 CLAW_SUPABASE_PROJECT_REF 与 CLAW_SUPABASE_TOKEN 后可跨部署同步。</p>
+        </div>
+        <button class="btn primary" id="syncBtn">立即同步</button>
+      </div>
+      <p class="modal-hint" id="syncResult"></p>
+    </div>
+  </div>
+</div>
+
 <script src="/static/app.js" defer></script>
 </body>
 </html>
