@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -26,6 +27,15 @@ def main(argv=None) -> int:
     parser.add_argument("--seed-demo", action="store_true", help="写入 samples/listing_demo.html 中的演示数据")
     args = parser.parse_args(argv)
 
+    print(f"[启动] 项目目录   ：{Path(__file__).resolve().parent}")
+    print(f"[启动] 数据目录   ：{config.DATA_DIR}")
+    print(f"[启动] 默认账号库 ：{config.DB_PATH}")
+    print(f"[启动] 用户库目录 ：{config.USER_DATA_DIR}")
+    print(f"[启动] 封面目录   ：{config.COVER_DIR}")
+    print(f"[启动] 下载目录   ：{config.DOWNLOADS_DIR}")
+    print(f"[启动] 存储模式   ：{config.STORAGE_BACKEND}"
+          f"（云模式未配置 Supabase 时自动回退 local）")
+
     db.init_db()
     if args.seed_demo:
         from app.demo import seed_demo
@@ -37,4 +47,14 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        print(f"\n[启动失败] {type(exc).__name__}: {exc}")
+        print(f"[诊断] 数据库文件：{config.DB_PATH}")
+        print(f"[诊断] 数据目录  ：{config.DATA_DIR}（父目录 {config.DATA_DIR.parent}）")
+        print(f"[诊断] 当前工作目录：{Path.cwd()}")
+        print(f"[诊断] 数据目录父级可写：{os.access(str(config.DATA_DIR.parent), os.W_OK)}")
+        raise SystemExit(1)
