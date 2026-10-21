@@ -536,6 +536,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _cloud_query_works(self, user: dict, **filters) -> dict:
         """云模式作品查询：拉云端作品行，内存里复用 db 的去重/选版/排序。"""
+        # 终极防御：user 必须含 username；为 None 时直接回 401（云模式必须登录）
+        if not user or not user.get("username"):
+            self._error("云端模式必须先登录", 401)
+            return {"items": [], "total": 0, "page": 1, "pages": 1, "per_page": 1,
+                    "raw_total": 0, "unique_total": 0, "language_stats": [],
+                    "dedupe": False, "sort": "recent"}
         username = user["username"]
         try:
             rows = supabase_client.cloud_fetch_gallery_rows(username)
@@ -1339,7 +1345,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _cloud_mark(self, user: dict, flag: str, ids, value: bool) -> int:
         """云模式：把标记直接写进云端作品行（按当前用户隔离）。"""
-        username = user["username"]
+        username = user.get("username", "") if user else ""
+        if not username:
+            return 0
         try:
             return supabase_client.cloud_mark_gallery_flags(username, ids,
                                                             flag_col=flag, value=value)
@@ -1494,7 +1502,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _cloud_want_targets(self, user: dict, *, skip_downloaded: bool) -> list[dict]:
         """云模式：从云端作品行算「待下载」目标（组内任一 want_download 即命中，取推荐版本）。"""
-        rows = supabase_client.cloud_fetch_gallery_rows(user["username"])
+        username = user.get("username", "") if user else ""
+        if not username:
+            return []
+        rows = supabase_client.cloud_fetch_gallery_rows(username)
         rows = [dict(r) for r in rows if not r.get("hidden")]
         if not rows:
             return []
@@ -1515,7 +1526,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _cloud_batch_targets(self, user: dict, batch_id: int, *, skip_downloaded: bool) -> list[dict]:
         """云模式：从云端作品行算指定批次目标。"""
-        rows = [dict(r) for r in supabase_client.cloud_fetch_gallery_rows(user["username"])
+        username = user.get("username", "") if user else ""
+        if not username:
+            return []
+        rows = [dict(r) for r in supabase_client.cloud_fetch_gallery_rows(username)
                 if not r.get("hidden") and int(r.get("batch_id") or 0) == int(batch_id)]
         if not rows:
             return []
