@@ -389,6 +389,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._error("未知路径", 404)
         except Exception as exc:  # 防御性兜底，避免连接挂起
+            import traceback
+            traceback.print_exc()
             self._error(f"服务器内部错误：{type(exc).__name__}: {exc}", 500)
 
     def _filtered_jobs(self, user: dict | None, limit: int = 100) -> dict:
@@ -1009,6 +1011,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._error("未知接口", 404)
         except Exception as exc:
+            import traceback
+            traceback.print_exc()
             self._error(f"服务器内部错误：{type(exc).__name__}: {exc}", 500)
 
     # ---------- 认证 ----------
