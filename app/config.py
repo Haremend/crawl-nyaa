@@ -15,14 +15,16 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 from .envfile import load_env  # noqa: E402 必须在读取下面的配置之前执行
 
 load_env(BASE_DIR / ".env")
-DATA_DIR = Path(os.environ.get("CLAW_DATA_DIR", BASE_DIR / "data"))
-DB_PATH = Path(os.environ.get("CLAW_DB", DATA_DIR / "gallery.sqlite3"))
+# 相对路径一律基于项目根（BASE_DIR）解析成绝对路径，避免 CWD 漂移导致
+# 数据目录塌缩到 "."（sqlite3.connect(".") 会打不开文件）。
+DATA_DIR = Path(os.environ.get("CLAW_DATA_DIR", "") or (BASE_DIR / "data")).resolve()
+DB_PATH = Path(os.environ.get("CLAW_DB", "") or (DATA_DIR / "gallery.sqlite3")).resolve()
 CACHE_DIR = DATA_DIR / "cache"
 THUMB_CACHE_DIR = CACHE_DIR / "thumbs"
 # 封面保存目录（项目根目录 cover/），文件名 <gallery_id>.<ext>
-COVER_DIR = Path(os.environ.get("CLAW_COVER_DIR", BASE_DIR / "cover"))
+COVER_DIR = Path(os.environ.get("CLAW_COVER_DIR", "") or (BASE_DIR / "cover")).resolve()
 # 下载文件保存目录（项目根目录 downloads/）
-DOWNLOADS_DIR = Path(os.environ.get("CLAW_DOWNLOADS_DIR", BASE_DIR / "download"))
+DOWNLOADS_DIR = Path(os.environ.get("CLAW_DOWNLOADS_DIR", "") or (BASE_DIR / "download")).resolve()
 # 批量下载时每个文件之间的间隔（秒）
 DOWNLOAD_DELAY = float(os.environ.get("CLAW_DOWNLOAD_DELAY", "1.0"))
 
@@ -93,7 +95,7 @@ PORT = int(os.environ.get("CLAW_PORT", "8787"))
 # 登录会话有效期（小时），默认 30 天
 SESSION_TTL_HOURS = max(1, int(os.environ.get("CLAW_SESSION_TTL_HOURS", "720") or 720))
 # 登录用户的独立 SQLite 目录：data/users/<用户名>.sqlite3
-USER_DATA_DIR = Path(os.environ.get("CLAW_USER_DATA_DIR", DATA_DIR / "users"))
+USER_DATA_DIR = Path(os.environ.get("CLAW_USER_DATA_DIR", "") or (DATA_DIR / "users")).resolve()
 
 # ---- 云端数据库（Supabase，可选）----
 # .env 默认不启用云端：留空 project_ref / token 即纯本地模式。
