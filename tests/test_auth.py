@@ -75,6 +75,7 @@ class FakeTransport:
         self.statements = []
         self.galleries = {}   # username -> list[row dict]
         self.runs = {}        # username -> list[row dict]
+        self.accounts = {}    # username -> 账号 dict（claw_users 行）
 
     @staticmethod
     def _username_from_where(sql):
@@ -98,6 +99,10 @@ class FakeTransport:
                 {"table_name": "claw_galleries"},
                 {"table_name": "claw_scrape_runs"},
             ]
+        if "from public.\"claw_users\"" in low:
+            name = self._username_from_where(sql) or ""
+            account = self.accounts.get(name)
+            return [account] if account else []
         if "from public.\"claw_galleries\"" in low and "where" in low:
             name = self._username_from_where(sql) or ""
             return list(self.galleries.get(name, []))

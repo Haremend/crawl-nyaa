@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 from . import config, covers as covers_mod, db
 from . import supabase_client
+from . import remote_client
 from .download_queue import DownloadQueue
 from .filenames import download_filename
 from .scraper import FetchError, Fetcher
@@ -318,10 +319,30 @@ class Handler(BaseHTTPRequestHandler):
             return f"{SESSION_COOKIE}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}"
         return f"{SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"
 
-    # 云端模式：这些路径允许匿名访问（静态资源、认证接口、同步状态）
+    # 云端模式：这些路径允许匿名访问（静态资源、认证接口、同步状态、机器间远程端点）
+    # /api/remote/* 是给「其他 claw 实例」调的，不能要求浏览器登录态，因此公开路由；
+    # 真正的访问控制靠 handler 里的 _require_remote_guard（Bearer 共享密钥）。
     _PUBLIC_PATHS = ("/", "/index.html", "/favicon.ico", "/static/", "/covers/",
                      "/api/auth/me", "/api/auth/register", "/api/auth/login",
-                     "/api/auth/logout", "/api/sync/status", "/api/meta")
+                     "/api/auth/logout", "/api/sync/status", "/api/meta",
+                     "/api/remote/account", "/api/remote/sync")
+
+    def _require_remote_guard(self) -> bool:
+        """/api/remote/* 的访问控制：B 共享密钥校验。
+
+        配了 CLAW_REMOTE_AUTH_TOKEN 时，请求必须带匹配的
+        ``Authorization: Bearer <token>``，否则 403；未配置则放行（开放）。
+        返回 True 放行，False 表示已发 403、调用方应直接 return。
+        """
+        expected = config.REMOTE_AUTH_TOKEN
+        if not expected:
+            return True
+        header = (self.headers.get("Authorization") or "").strip()
+        token = header[7:].strip() if header.startswith("Bearer ") else ""
+        if not secrets.compare_digest(token, expected):
+            self._error("远程端点密钥不匹配", 403)
+            return False
+        return True
 
     def _cloud_login_guard(self, path: str) -> bool:
         """云端模式强制登录：返回 True 表示已放行（或非云模式），
@@ -369,6 +390,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._handle_site_favorites(query)
             elif path == "/api/sync/status":
                 self._handle_sync_status()
+            elif path == "/api/remote/account":
+                self._handle_remote_account(query=query)
             elif path == "/api/download/targets":
                 mode = (query.get("mode", ["want"])[0] or "want").lower()
                 user = self._current_user()
@@ -547,6 +570,8 @@ class Handler(BaseHTTPRequestHandler):
             },
             "supabase_configured": supabase_client.configured(),
             "storage_backend": "cloud" if config.storage_is_cloud() else "local",
+            "remote_configured": config.remote_configured(),
+            "remote_base_masked": self._remote_base_masked(),
         })
 
     def _handle_works(self, query: dict) -> None:
@@ -1108,6 +1133,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._handle_sync_pull()
             elif path == "/api/sync/push":
                 self._handle_sync_push()
+            elif path == "/api/remote/sync":
+                self._handle_remote_sync()
+            elif path == "/api/remote/account":
+                self._handle_remote_account()
             elif path == "/api/scrape":
                 self._handle_scrape()
             elif path == "/api/scrape/cancel":
@@ -1160,12 +1189,22 @@ class Handler(BaseHTTPRequestHandler):
         site_origin = normalize_origin(str(payload.get("site_origin") or ""))
         cloud_used = False
         cloud_error = ""
-        # 注册永远尝试写云端（claw_users）：不同设备登录免重注册、Key 跟账号走。
-        # 本地模式允许云端失败时回退纯本地注册；云模式必须云端成功。
-        if supabase_client.configured():
+        salt, digest = db.hash_password(password, salt=None)
+        # 配置了远程 VPS 时：注册必须先写进云端（claw_users），成功才落本地 ——
+        # 这是 C 端免带 Supabase 凭据的方案（VPS 持有 PAT 作为账号权威）。
+        if config.remote_configured():
+            try:
+                remote_client.get_client().upsert_account(
+                    username, api_key=api_key, site_origin=site_origin,
+                    password_hash=digest, salt=salt, created_at=db.utc_now())
+                cloud_used = True
+            except remote_client.RemoteError as exc:
+                self._error(f"注册失败：无法写入远程 VPS：{exc}", 400)
+                return
+        # 未配远程、但配了 Supabase：维持现状直连云端（best-effort，失败回退纯本地）
+        elif supabase_client.configured():
             try:
                 supabase_client.ensure_tables()
-                salt, digest = db.hash_password(password, salt=None)
                 supabase_client.push_user_credentials(
                     username, api_key=api_key, site_origin=site_origin,
                     password_hash=digest, salt=salt, created_at=db.utc_now())
@@ -1201,8 +1240,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         # 优先本地验证
         if not db.verify_user(username, password, self.server.db_path):
-            # 本地没有该用户且云端可用时，从云端拉账号记录回退验证
-            if not (supabase_client.configured() and self._cloud_login_fallback(username, password)):
+            # 本地没有该用户且（远程 VPS 或 Supabase）可用时，从云端账号记录回退验证
+            if not ((config.remote_configured() or supabase_client.configured())
+                    and self._cloud_login_fallback(username, password)):
                 self._error("用户名或密码错误", 401)
                 return
         token = db.create_session(username, path=self.server.db_path)
@@ -1211,11 +1251,21 @@ class Handler(BaseHTTPRequestHandler):
                    headers={"Set-Cookie": self._session_cookie_header(token, max_age=max_age)})
 
     def _cloud_login_fallback(self, username: str, password: str) -> bool:
-        """本地无该用户时，从云端账号表拉取记录并在本地重建后验证。"""
-        try:
-            account = supabase_client.fetch_account(username)
-        except supabase_client.SupabaseError:
-            return False
+        """本地无该用户时，从云端账号表拉取记录并在本地重建后验证。
+
+        拉账号那一步按配置分流：配了 CLAW_REMOTE_BASE 走 VPS（本机无需
+        Supabase 凭据）；否则直连 Supabase。其余（PBKDF2 重算、重建本地行）不变。
+        """
+        if config.remote_configured():
+            try:
+                account = remote_client.get_client().fetch_account(username)
+            except remote_client.RemoteError:
+                return False
+        else:
+            try:
+                account = supabase_client.fetch_account(username)
+            except supabase_client.SupabaseError:
+                return False
         if not account:
             return False
         salt = str(account.get("salt") or "")
@@ -1342,10 +1392,18 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- 同步 ----------
     def _handle_sync_status(self) -> None:
+        # 云模式：业务数据直连云端，无同步对象
         if config.storage_is_cloud():
             self._json({"ok": True, "configured": True, "available": True,
                         "cloud_mode": True,
                         "message": "云模式：数据直连云端，无需同步"})
+            return
+        # 本地模式 + 配了远程 VPS：同步走 VPS（本机无需 Supabase 凭据）
+        if config.remote_configured():
+            self._json({"ok": True, "configured": True, "available": True,
+                        "cloud_mode": False, "via_remote": True,
+                        "remote_base_masked": self._remote_base_masked(),
+                        "message": "已通过远程 VPS 同步（本机无需 Supabase 凭据）。"})
             return
         configured = supabase_client.configured()
         available = False
@@ -1355,7 +1413,16 @@ class Handler(BaseHTTPRequestHandler):
             except supabase_client.SupabaseError:
                 available = False
         self._json({"ok": True, "configured": configured, "available": available,
-                    "cloud_mode": False})
+                    "cloud_mode": False, "via_remote": False,
+                    "remote_base_masked": self._remote_base_masked()})
+
+    def _remote_base_masked(self) -> str:
+        """把 CLAW_REMOTE_BASE 脱敏成 host[:port]（不暴露路径/query）。"""
+        base = config.REMOTE_BASE
+        if not base:
+            return ""
+        netloc = urlsplit(base).netloc
+        return netloc or base
 
     def _handle_sync(self) -> None:
         user = self._ensure_login()
@@ -1366,11 +1433,31 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "cloud_mode": True,
                         "message": "当前为云模式：数据直连云端，无需同步"})
             return
+        username = user["username"]
+        user_db = db.user_db_path(username)
+        # 远程 VPS 优先；否则直连 Supabase（维持现状）
+        if config.remote_configured():
+            try:
+                res = remote_client.get_client().pull(username)
+                pulled_g = db.upsert_gallery_rows_from_cloud(res.get("galleries", []), user_db)
+                pulled_r = db.upsert_run_rows_from_cloud(res.get("runs", []), user_db)
+            except remote_client.RemoteError as exc:
+                self._error(f"远程 VPS 拉取失败：{exc}", 502)
+                return
+            res2 = remote_client.get_client().push(
+                username, db.all_gallery_rows(user_db)[:config.SUPABASE_SYNC_MAX_ROWS],
+                db.all_run_rows(user_db)[:config.SUPABASE_SYNC_MAX_ROWS])
+            self._json({"ok": True, "username": username,
+                        "pulled": {"galleries": pulled_g, "runs": pulled_r},
+                        "pushed": res2.get("pushed", {}),
+                        "cloud": res.get("counts", {}),
+                        "local": {"galleries": len(db.all_gallery_rows(user_db)),
+                                   "runs": len(db.all_run_rows(user_db))},
+                        "via_remote": True})
+            return
         if not supabase_client.configured():
             self._error("未配置云端数据库：请在 .env 里填写 CLAW_SUPABASE_PROJECT_REF 与 CLAW_SUPABASE_TOKEN", 400)
             return
-        username = user["username"]
-        user_db = db.user_db_path(username)
         try:
             result = supabase_client.sync_user(username, user_db)
         except supabase_client.SupabaseError as exc:
@@ -1387,11 +1474,27 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "cloud_mode": True,
                         "message": "当前为云模式：数据直连云端，无需同步"})
             return
+        username = user["username"]
+        user_db = db.user_db_path(username)
+        # 远程 VPS 优先：拉远端全量 → 本地合并（1 覆盖 0 / last_seen 新者胜）
+        if config.remote_configured():
+            try:
+                res = remote_client.get_client().pull(username)
+            except remote_client.RemoteError as exc:
+                self._error(f"远程 VPS 拉取失败：{exc}", 502)
+                return
+            pulled_g = db.upsert_gallery_rows_from_cloud(res.get("galleries", []), user_db)
+            pulled_r = db.upsert_run_rows_from_cloud(res.get("runs", []), user_db)
+            self._json({"ok": True, "username": username,
+                        "cloud": res.get("counts", {}),
+                        "pulled": {"galleries": pulled_g, "runs": pulled_r},
+                        "local": {"galleries": len(db.all_gallery_rows(user_db)),
+                                   "runs": len(db.all_run_rows(user_db))},
+                        "via_remote": True})
+            return
         if not supabase_client.configured():
             self._error("未配置云端数据库：请在 .env 里填写 CLAW_SUPABASE_PROJECT_REF 与 CLAW_SUPABASE_TOKEN", 400)
             return
-        username = user["username"]
-        user_db = db.user_db_path(username)
         try:
             result = supabase_client.pull_user(username, user_db)
         except supabase_client.SupabaseError as exc:
@@ -1408,17 +1511,115 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "cloud_mode": True,
                         "message": "当前为云模式：数据直连云端，无需同步"})
             return
+        username = user["username"]
+        user_db = db.user_db_path(username)
+        # 远程 VPS 优先：本地全量 → 远端做云端合并
+        if config.remote_configured():
+            limit = config.SUPABASE_SYNC_MAX_ROWS
+            galleries = db.all_gallery_rows(user_db)[:limit]
+            runs = db.all_run_rows(user_db)[:limit]
+            try:
+                res = remote_client.get_client().push(username, galleries, runs)
+            except remote_client.RemoteError as exc:
+                self._error(f"远程 VPS 推送失败：{exc}", 502)
+                return
+            self._json({"ok": True, "username": username,
+                        "pushed": res.get("pushed", {}),
+                        "local": {"galleries": len(galleries), "runs": len(runs)},
+                        "via_remote": True})
+            return
         if not supabase_client.configured():
             self._error("未配置云端数据库：请在 .env 里填写 CLAW_SUPABASE_PROJECT_REF 与 CLAW_SUPABASE_TOKEN", 400)
             return
-        username = user["username"]
-        user_db = db.user_db_path(username)
         try:
             result = supabase_client.push_user_data(username, user_db)
         except supabase_client.SupabaseError as exc:
             self._error(str(exc), exc.status or 502)
             return
         self._json({"ok": True, **result})
+
+    # ---------- 远程 VPS 端点（云模式部署实现，C 端调用）----------
+    def _handle_remote_account(self, *, query: dict | None = None) -> None:
+        """/api/remote/account：GET 读账号 / POST upsert 账号凭据（都写 claw_users）。
+
+        给「其他 claw 实例」在 C 端登录/注册时调用，由本部署（云模式）作为
+        账号权威读写 Supabase。访问控制走 _require_remote_guard（Bearer 密钥）。
+        """
+        if not self._require_remote_guard():
+            return
+        username = ""
+        if self.command == "GET":
+            values = (query or {}).get("username") or []
+            username = str(values[0] if values else "").strip()
+            if not username:
+                self._error("缺少 username", 400)
+                return
+            if not supabase_client.configured():
+                self._error("本部署未配置 Supabase，无法作为远程账号权威", 400)
+                return
+            try:
+                account = supabase_client.fetch_account(username)
+            except supabase_client.SupabaseError as exc:
+                self._error(str(exc), exc.status or 502)
+                return
+            self._json({"ok": True, "account": account})
+            return
+        # POST：upsert 凭据进 claw_users
+        payload = self._read_json()
+        if payload is None:
+            return
+        username = str(payload.get("username") or "").strip()
+        if not username:
+            self._error("缺少 username", 400)
+            return
+        if not supabase_client.configured():
+            self._error("本部署未配置 Supabase，无法作为远程账号权威", 400)
+            return
+        try:
+            supabase_client.push_user_credentials(
+                username,
+                api_key=str(payload.get("api_key") or ""),
+                site_origin=str(payload.get("site_origin") or ""),
+                password_hash=str(payload.get("password_hash") or ""),
+                salt=str(payload.get("salt") or ""),
+                created_at=str(payload.get("created_at") or ""),
+            )
+        except supabase_client.SupabaseError as exc:
+            self._error(str(exc), exc.status or 502)
+            return
+        self._json({"ok": True, "username": username})
+
+    def _handle_remote_sync(self) -> None:
+        """/api/remote/sync：C 端拉取/推送作品与批次，由本部署做云端合并。"""
+        if not self._require_remote_guard():
+            return
+        payload = self._read_json()
+        if payload is None:
+            return
+        username = str(payload.get("username") or "").strip()
+        direction = str(payload.get("direction") or "pull").lower()
+        if not username:
+            self._error("缺少 username", 400)
+            return
+        if not supabase_client.configured():
+            self._error("本部署未配置 Supabase，无法作为远程同步权威", 400)
+            return
+        try:
+            if direction == "push":
+                galleries = payload.get("galleries") or []
+                runs = payload.get("runs") or []
+                pushed = supabase_client.push_user(username, galleries, runs)
+                self._json({"ok": True, "username": username, "pushed": pushed})
+                return
+            # pull（默认）：回该用户云端全量行，供 C 端本地合并
+            data = supabase_client.fetch_user(username)
+            self._json({"ok": True, "username": username,
+                        "galleries": data["galleries"], "runs": data["runs"],
+                        "counts": {"galleries": len(data["galleries"]),
+                                   "runs": len(data["runs"])}})
+        except supabase_client.SupabaseError as exc:
+            self._error(str(exc), exc.status or 502)
+            return
 
     # ---------- 抓取 / 标记 / 下载 ----------
     def _handle_scrape(self) -> None:

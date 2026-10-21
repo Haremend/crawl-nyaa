@@ -329,9 +329,16 @@ async function saveSettings() {
 async function loadSyncStatus() {
   try {
     const data = await api("/api/sync/status", { silent: true });
-    const text = !data.configured
-      ? "未配置云端：在 .env 里填 CLAW_SUPABASE_PROJECT_REF 与 CLAW_SUPABASE_TOKEN 后可跨部署同步。"
-      : (data.available ? "云端已就绪：可拉取远程数据 / 推送覆盖远程数据。" : "云端已配置但表尚未就绪，点「拉取」会自动建表。");
+    let text;
+    if (data.via_remote) {
+      text = "已通过远程 VPS" + (data.remote_base_masked ? "（" + data.remote_base_masked + "）" : "") +
+        " 同步，本机无需 Supabase 凭据。可拉取 / 推送。";
+    } else if (!data.configured) {
+      text = "未配置云端：在 .env 里填 CLAW_SUPABASE_PROJECT_REF 与 CLAW_SUPABASE_TOKEN（或 CLAW_REMOTE_BASE 指向 VPS）后可跨部署同步。";
+    } else {
+      text = data.available ? "云端已就绪：可拉取远程数据 / 推送覆盖远程数据。"
+        : "云端已配置但表尚未就绪，点「拉取」会自动建表。";
+    }
     $("syncStatusText").textContent = text;
     const enabled = data.configured;
     $("pullBtn").disabled = !enabled;

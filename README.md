@@ -413,6 +413,25 @@ cp .env.example .env    # 生成模板后按需修改
 | `CLAW_SUPABASE_TIMEOUT` | `30` | 云端请求超时（秒） |
 | `CLAW_SUPABASE_TABLE_PREFIX` | `claw_` | 云端业务表名前缀 |
 | `CLAW_SUPABASE_SYNC_MAX_ROWS` | `20000` | 单次同步读取/推送的最大行数 |
+| `CLAW_REMOTE_BASE` | 空 | 指向已部署的 claw-nhentai VPS（云模式）。C 端设了它后，登录/注册/拉取/推送全走 VPS 的 `/api/remote/*`，本机无需 `CLAW_SUPABASE_*`。留空=直连 Supabase 或纯本地 |
+| `CLAW_REMOTE_AUTH_TOKEN` | 空 | 远程端点共享密钥；VPS 与 C 端填同一个值。空=开放（不推荐，强烈建议非空） |
+
+### 远程 VPS 端点（给其他 claw 实例调）
+
+设了 `CLAW_REMOTE_BASE` 的 C 端，登录/注册/同步改走该 VPS 的这两个端点（由 VPS 作为
+唯一的 Supabase 账号权威，C 端本机不再需要 Supabase 凭据）：
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| GET / POST | `/api/remote/account` | 读账号（`fetch_account`）/ upsert 账号凭据（`push_user_credentials`） |
+| POST | `/api/remote/sync` | 按 `direction`：`pull`=回该用户云端全量作品/批次行；`push`=把 C 端行做云端合并 |
+
+访问控制：两个端点都在公开路由里（供机器间调用，不要求浏览器登录态），真正的访问控制
+靠 `CLAW_REMOTE_AUTH_TOKEN`——请求需带 `Authorization: Bearer <token>`，VPS 校验不匹配则 403。
+
+**部署顺序**：① VPS 先部署本变更并设好 `CLAW_REMOTE_AUTH_TOKEN`（保持云模式 + Supabase）；
+② 验证 `GET /api/remote/account?username=` 带对密钥返回账号、错密钥 403；③ C 端 `.env` 填
+`CLAW_REMOTE_BASE` + 相同密钥、`CLAW_STORAGE_BACKEND=local`，可删掉 `CLAW_SUPABASE_*`。
 
 ## 测试
 

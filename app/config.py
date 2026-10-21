@@ -161,6 +161,22 @@ def supabase_configured() -> bool:
     """是否具备读写云端数据库的最小配置。"""
     return bool(SUPABASE_PROJECT_REF and SUPABASE_TOKEN)
 
+
+# ---- 远程同步（可选，替代直连 Supabase 的 C 端方案）----
+# 指向一台已部署的 claw-nhentai VPS（云模式 + Supabase 已配好）。设了之后，
+# 本地模式的登录/注册/拉取/推送全部改走该 VPS 的 REST API，本地不再需要
+# 任何 CLAW_SUPABASE_* 凭据。VPS 端必须先部署带 /api/remote/* 的新代码。
+# 留空 = 维持现状（直连 Supabase 或纯本地），向后兼容。
+REMOTE_BASE = (os.environ.get("CLAW_REMOTE_BASE", "") or "").strip().rstrip("/")
+# 可选共享密钥：VPS 与本地 .env 填同一个值；本地请求带 Authorization: Bearer，
+# VPS 校验不匹配则 403。两侧都为空时 /api/remote/* 开放（不推荐）。
+REMOTE_AUTH_TOKEN = (os.environ.get("CLAW_REMOTE_AUTH_TOKEN", "") or "").strip()
+
+
+def remote_configured() -> bool:
+    """是否配置了远程 VPS（本地模式下 auth + sync 走它而非直连 Supabase）。"""
+    return bool(REMOTE_BASE)
+
 THUMB_MAX_BYTES = 8 * 1024 * 1024
 EXPORT_MAX_ROWS = 20000
 

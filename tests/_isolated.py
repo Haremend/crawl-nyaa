@@ -11,8 +11,15 @@ def _force_local() -> None:
     _config.STORAGE_BACKEND = "local"
     _config.SUPABASE_PROJECT_REF = ""
     _config.SUPABASE_TOKEN = ""
+    _config.REMOTE_BASE = ""
+    _config.REMOTE_AUTH_TOKEN = ""
     try:
         from app import supabase_client as _sc
         _sc.set_transport(None)
+    except Exception:
+        pass
+    try:
+        from app import remote_client as _rc
+        _rc.reset_client()
     except Exception:
         pass
