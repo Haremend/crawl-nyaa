@@ -1518,8 +1518,14 @@ def user_db_path(username: str, base_dir=None):
         return Path(config.DB_PATH)
     safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in name).strip("._")
     safe = safe or "user"
-    root = Path(base_dir) if base_dir is not None else Path(config.DATA_DIR)
-    return root / "users" / f"{safe}.sqlite3"
+    if base_dir is not None:
+        # 兼容旧调用：base_dir 是「数据根目录」，用户库放在它下面的 users/
+        root = Path(base_dir) / "users"
+    else:
+        # 以 config.USER_DATA_DIR 为准（可用 CLAW_USER_DATA_DIR 覆盖）；
+        # 默认值就是 DATA_DIR/users，与历史布局一致。
+        root = Path(config.USER_DATA_DIR)
+    return root / f"{safe}.sqlite3"
 
 
 def hash_password(password: str, salt: str | None = None) -> tuple[str, str]:

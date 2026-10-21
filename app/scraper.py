@@ -172,7 +172,7 @@ def iter_pages(
 ) -> Iterator[PageResult]:
     """逐页抓取列表并产出 PageResult；调用方负责入库与统计。"""
     fetcher = fetcher or Fetcher()
-    delay = config.PAGE_DELAY if delay is None else max(config.MIN_PAGE_DELAY, delay)
+    delay = config.PAGE_DELAY if delay is None else config.clamp_page_delay(delay)
     log = on_log or (lambda message: None)
     stopped = should_stop or (lambda: False)
 

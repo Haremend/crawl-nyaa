@@ -439,7 +439,7 @@ class ScrapeService:
                 delay_value = float(delay) if delay not in (None, "") else config.PAGE_DELAY
             except (TypeError, ValueError):
                 delay_value = config.PAGE_DELAY
-            delay_value = max(config.MIN_PAGE_DELAY, min(10.0, delay_value))
+            delay_value = config.clamp_page_delay(delay_value)
             enrich_enabled = self._bool_option(enrich, config.ENRICH_DEFAULT)
             covers_on = self._bool_option(covers, config.COVER_DEFAULT)
             incremental_on = self._bool_option(incremental, config.INCREMENTAL)

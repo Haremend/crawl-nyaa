@@ -494,6 +494,25 @@ class Handler(BaseHTTPRequestHandler):
             },
         })
 
+    def _limits(self) -> dict:
+        """抓取表单的默认值与上下限；单一来源是 config（即 .env）。
+
+        前端 applyLimits() 直接拿这些值初始化输入框/复选框，
+        页面里不再硬编码，避免「改了 .env 页面没变」。
+        """
+        min_delay, max_delay = config.page_delay_bounds()
+        return {
+            "max_pages": config.MAX_PAGES,
+            "default_delay": config.PAGE_DELAY,
+            "min_delay": min_delay,
+            "max_delay": max_delay,
+            "detail_delay": config.DETAIL_DELAY,
+            "cover_delay": config.COVER_DELAY,
+            "enrich_default": config.ENRICH_DEFAULT,
+            "covers_default": config.COVER_DEFAULT,
+            "incremental_default": config.INCREMENTAL,
+        }
+
     def _handle_meta(self) -> None:
         user = self._current_user()
         user_db = self._user_db_path(user)
@@ -518,13 +537,7 @@ class Handler(BaseHTTPRequestHandler):
             "batches": batches,
             "download_status": self._filtered_jobs(user),
             "stats": stats,
-            "limits": {
-                "max_pages": config.MAX_PAGES,
-                "default_delay": config.PAGE_DELAY,
-                "min_delay": config.MIN_PAGE_DELAY,
-                "detail_delay": config.DETAIL_DELAY,
-                "enrich_default": config.ENRICH_DEFAULT,
-            },
+            "limits": self._limits(),
             "scrape": self._scrape_service(user).snapshot(),
             "user": {
                 "logged_in": bool(user),

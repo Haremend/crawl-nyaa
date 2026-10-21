@@ -73,7 +73,29 @@ USER_AGENT = os.environ.get("CLAW_UA") or (
 REQUEST_TIMEOUT = float(os.environ.get("CLAW_TIMEOUT", "30"))
 REQUEST_RETRIES = int(os.environ.get("CLAW_RETRIES", "3"))
 PAGE_DELAY = float(os.environ.get("CLAW_DELAY", "1.2"))
-MIN_PAGE_DELAY = 0.2
+# 页面间隔的硬下限/硬上限（秒）：下限防止把上游打满，上限防止误填一个巨大的值。
+# 二者都可以用 CLAW_MIN_DELAY / CLAW_MAX_DELAY 覆盖。
+MIN_PAGE_DELAY = max(0.0, float(os.environ.get("CLAW_MIN_DELAY", "0.2") or 0.2))
+MAX_PAGE_DELAY = max(0.1, float(os.environ.get("CLAW_MAX_DELAY", "10") or 10))
+
+
+def page_delay_bounds() -> tuple[float, float]:
+    """页面间隔的**实际**可用区间 (下限, 上限)，单位秒。
+
+    下限取 ``min(MIN_PAGE_DELAY, PAGE_DELAY)``，上限取
+    ``max(MAX_PAGE_DELAY, PAGE_DELAY)``：保证管理员在 .env 里配的
+    ``CLAW_DELAY`` 一定落在区间内，不会被硬编码的 0.2/10 悄悄改掉（历史 bug）；
+    同时请求里传来的 0 / 负数 / 超大值仍会被夹住，不会把上游打满。
+    """
+    floor = max(0.0, min(MIN_PAGE_DELAY, PAGE_DELAY))
+    ceiling = max(MAX_PAGE_DELAY, PAGE_DELAY, floor)
+    return floor, ceiling
+
+
+def clamp_page_delay(value: float) -> float:
+    """把页面间隔夹到 `page_delay_bounds()` 给出的区间内。"""
+    floor, ceiling = page_delay_bounds()
+    return max(floor, min(ceiling, float(value)))
 # 详情补全（/api/v2/galleries/{id}）的请求间隔与默认开关
 DETAIL_DELAY = float(os.environ.get("CLAW_DETAIL_DELAY", "0.4"))
 # 封面下载间隔（秒）与默认开关

@@ -33,6 +33,7 @@ const state = {
   dlPolling: null,
   finishedRunId: null,
   urlInitialized: false,
+  limitsInitialized: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -491,6 +492,25 @@ function buildParams(includePaging = true) {
 /* ==================================================================
  * 元数据
  * ================================================================== */
+/* 抓取表单的默认值与上下限一律来自后端 /api/meta 的 limits（即 .env 配置项），
+ * 页面上不再硬编码：改了 .env 重启后，页面显示与可用范围跟着变。
+ * 只在首次拿到 meta 时套用一次，避免轮询/刷新覆盖用户的临时改动。 */
+function applyLimits(meta) {
+  if (state.limitsInitialized) return;
+  const limits = (meta && meta.limits) || {};
+  const delay = $("delay");
+  if (Number.isFinite(limits.default_delay)) delay.value = String(limits.default_delay);
+  if (Number.isFinite(limits.min_delay)) delay.min = String(limits.min_delay);
+  if (Number.isFinite(limits.max_delay)) delay.max = String(limits.max_delay);
+  if (Number.isFinite(limits.max_pages) && limits.max_pages > 0) {
+    $("maxPages").max = String(limits.max_pages);
+  }
+  if (typeof limits.enrich_default === "boolean") $("enrichCheck").checked = limits.enrich_default;
+  if (typeof limits.covers_default === "boolean") $("coverCheck").checked = limits.covers_default;
+  if (typeof limits.incremental_default === "boolean") $("incrementalCheck").checked = limits.incremental_default;
+  state.limitsInitialized = true;
+}
+
 async function loadMeta() {
   const meta = await api("/api/meta");
   state.meta = meta;
@@ -498,6 +518,7 @@ async function loadMeta() {
     $("urlInput").value = meta.default_url;
     state.urlInitialized = true;
   }
+  applyLimits(meta);
   renderProxy(meta);
   const parts = ["库内 " + meta.stats.entries + " 条", "去重后 " + meta.stats.works + " 部"];
   if (meta.stats.want_download) parts.push("待下载 " + meta.stats.want_download);
@@ -1082,6 +1103,8 @@ async function startScrape() {
   state.finishedRunId = null;
   $("startBtn").disabled = true;
   $("progressPanel").hidden = false;
+  const limits = (state.meta && state.meta.limits) || {};
+  const fallbackDelay = Number.isFinite(limits.default_delay) ? limits.default_delay : 1.2;
   try {
     await api("/api/scrape", {
       method: "POST",
@@ -1089,10 +1112,10 @@ async function startScrape() {
       body: JSON.stringify({
         url: url,
         max_pages: Number($("maxPages").value || 0),
-        delay: Number($("delay").value || 1.2),
+        delay: Number($("delay").value || fallbackDelay),
         enrich: $("enrichCheck").checked,
         covers: $("coverCheck").checked,
-        incremental: true,
+        incremental: $("incrementalCheck").checked,
       }),
     });
     toast("已开始抓取");
