@@ -21,6 +21,13 @@ TMP_ROOT.mkdir(exist_ok=True)
 ILLEGAL = '<>:"/\\|?*'
 
 
+from app import config as _lock_cfg, supabase_client as _lock_sc
+_lock_cfg.STORAGE_BACKEND = "local"
+_lock_cfg.SUPABASE_PROJECT_REF = ""
+_lock_cfg.SUPABASE_TOKEN = ""
+_lock_sc.set_transport(None)
+
+
 def make_temp_dir(prefix: str) -> Path:
     path = TMP_ROOT / f"{prefix}_{uuid.uuid4().hex[:10]}"
     path.mkdir()

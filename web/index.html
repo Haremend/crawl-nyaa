@@ -311,7 +311,10 @@
           <strong>数据同步</strong>
           <p class="modal-hint" id="syncStatusText">未配置云端：在 .env 里填 CLAW_SUPABASE_PROJECT_REF 与 CLAW_SUPABASE_TOKEN 后可跨部署同步。</p>
         </div>
-        <button class="btn primary" id="syncBtn">立即同步</button>
+        <div class="sync-buttons">
+          <button class="btn primary" id="pullBtn">拉取远程数据</button>
+          <button class="btn primary" id="pushBtn">推送覆盖远程</button>
+        </div>
       </div>
       <p class="modal-hint" id="syncResult"></p>
     </div>

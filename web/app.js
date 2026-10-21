@@ -291,7 +291,8 @@ function openSettingsModal() {
     const syncRow = document.getElementById("syncRow");
     if (syncRow) syncRow.style.display = "none";
     $("syncStatusText").textContent = "云模式：数据直连云端，无需同步。";
-    $("syncBtn").disabled = true;
+    $("pullBtn").disabled = true;
+    $("pushBtn").disabled = true;
   } else {
     const syncRow = document.getElementById("syncRow");
     if (syncRow) syncRow.style.display = "";
@@ -329,41 +330,49 @@ async function loadSyncStatus() {
     const data = await api("/api/sync/status", { silent: true });
     const text = !data.configured
       ? "未配置云端：在 .env 里填 CLAW_SUPABASE_PROJECT_REF 与 CLAW_SUPABASE_TOKEN 后可跨部署同步。"
-      : (data.available ? "云端已就绪，可同步作品与批次记录。" : "云端已配置但表尚未就绪，点「立即同步」会自动建表。");
+      : (data.available ? "云端已就绪：可拉取远程数据 / 推送覆盖远程数据。" : "云端已配置但表尚未就绪，点「拉取」会自动建表。");
     $("syncStatusText").textContent = text;
-    $("syncBtn").disabled = !data.configured;
+    const enabled = data.configured;
+    $("pullBtn").disabled = !enabled;
+    $("pushBtn").disabled = !enabled;
   } catch (error) {
     $("syncStatusText").textContent = "无法读取云端状态：" + error.message;
-    $("syncBtn").disabled = true;
+    $("pullBtn").disabled = true;
+    $("pushBtn").disabled = true;
   }
 }
 
-async function doSync() {
+async function doSync(direction) {
   if (!state.user) { toast("请先登录", "error"); return; }
-  $("syncBtn").disabled = true;
-  $("syncResult").textContent = "正在同步…";
+  const btn = direction === "pull" ? $("pullBtn") : $("pushBtn");
+  const other = direction === "pull" ? $("pushBtn") : $("pullBtn");
+  btn.disabled = true; other.disabled = true;
+  $("syncResult").textContent = (direction === "pull" ? "正在拉取远程数据…" : "正在推送覆盖远程…");
   try {
-    const data = await api("/api/sync", {
+    const data = await api("/api/sync/" + direction, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: "{}",
     });
-    const cloud = data.cloud || {};
     const pulled = data.pulled || {};
     const pushed = data.pushed || {};
     const local = data.local || {};
-    $("syncResult").textContent =
-      "云端 作品 " + (cloud.galleries || 0) + " / 批次 " + (cloud.runs || 0)
-      + " · 拉取合并 作品 " + (pulled.galleries || 0) + " / 批次 " + (pulled.runs || 0)
-      + " · 推回 作品 " + (pushed.galleries || 0) + " / 批次 " + (pushed.runs || 0)
-      + " · 本地 作品 " + (local.galleries || 0) + " / 批次 " + (local.runs || 0);
-    toast("同步完成", "ok");
+    if (direction === "pull") {
+      $("syncResult").textContent =
+        "拉取完成：作品 " + (pulled.galleries || 0) + " / 批次 " + (pulled.runs || 0)
+        + " · 本地 作品 " + (local.galleries || 0) + " / 批次 " + (local.runs || 0);
+    } else {
+      $("syncResult").textContent =
+        "推送完成：作品 " + (pushed.galleries || 0) + " / 批次 " + (pushed.runs || 0)
+        + " · 本地 作品 " + (local.galleries || 0) + " / 批次 " + (local.runs || 0);
+    }
+    toast(direction === "pull" ? "拉取完成" : "推送完成", "ok");
     await reloadAll();
   } catch (error) {
-    $("syncResult").textContent = "同步失败：" + error.message;
-    toast("同步失败：" + error.message, "error");
+    $("syncResult").textContent = (direction === "pull" ? "拉取失败：" : "推送失败：") + error.message;
+    toast(error.message, "error");
   } finally {
-    $("syncBtn").disabled = false;
+    btn.disabled = false; other.disabled = false;
   }
 }
 
@@ -1183,7 +1192,8 @@ function bindEvents() {
   $("authPassword").addEventListener("keydown", (event) => { if (event.key === "Enter") submitAuth(); });
   $("settingsClose").addEventListener("click", closeSettingsModal);
   $("settingsSave").addEventListener("click", saveSettings);
-  $("syncBtn").addEventListener("click", doSync);
+  $("pullBtn").addEventListener("click", () => doSync("pull"));
+  $("pushBtn").addEventListener("click", () => doSync("push"));
   // 点弹窗遮罩关闭
   $("authModal").addEventListener("click", (event) => { if (event.target.id === "authModal") closeAuthModal(); });
   $("settingsModal").addEventListener("click", (event) => { if (event.target.id === "settingsModal") closeSettingsModal(); });

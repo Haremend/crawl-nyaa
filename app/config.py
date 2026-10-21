@@ -114,11 +114,17 @@ if not SUPABASE_DB_URL and SUPABASE_PROJECT_REF:
     SUPABASE_DB_URL = f"https://{SUPABASE_PROJECT_REF}.supabase.co"
 
 # ---- 存储模式开关 ----
-# local（默认）：业务数据存本地 SQLite；注册写云端，「同步」按钮双向同步。
-# cloud（VPS 部署）：业务数据直接读写 Supabase，不落本地 SQLite；
+# cloud（默认）：业务数据直接读写 Supabase，不落本地 SQLite；
 #   没有同步操作（数据本就在云端），账号注册/登录一律走云端。
-STORAGE_BACKEND = (os.environ.get("CLAW_STORAGE_BACKEND", "local") or "local").strip().lower()
+# local（本机/无云端时）：业务数据存本地 SQLite；注册写云端、同步按钮双向同步。
+# VPS 部署直接用默认云模式；纯本机离线使用可显式设 CLAW_STORAGE_BACKEND=local。
+# 自动回退：选了 cloud 但没配 SUPABASE_PROJECT_REF/TOKEN 时降级为 local，
+# 避免测试 / 新克隆 / 未配云端的环境启动即坏。
+STORAGE_BACKEND = (os.environ.get("CLAW_STORAGE_BACKEND", "cloud") or "cloud").strip().lower()
 if STORAGE_BACKEND not in ("local", "cloud"):
+    STORAGE_BACKEND = "cloud"
+if STORAGE_BACKEND == "cloud" and not (SUPABASE_PROJECT_REF and SUPABASE_TOKEN):
+    # 云模式要求云端已配置；未配置时降级 local，保持本地功能可用
     STORAGE_BACKEND = "local"
 
 

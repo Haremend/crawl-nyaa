@@ -29,6 +29,7 @@ from .download_queue import DownloadQueue
 from .filenames import download_filename
 from .scraper import FetchError, Fetcher
 from .upstream import UpstreamClient, UpstreamError
+from . import service as service_module
 from .service import ScrapeError, ScrapeService
 
 
@@ -204,8 +205,23 @@ class Handler(BaseHTTPRequestHandler):
         return self.server.db_path
 
     def _scrape_service(self, user: dict | None) -> ScrapeService:
+        """按用户 + 存储模式取抓取服务。
+
+        本地模式：SQLiteSink（写用户库 / 默认库，现状行为）；
+        云模式：CloudSink（抓取数据直接写 Supabase，不落本地 SQLite）。
+        """
         username = (user or {}).get("username", "")
-        return self.server.service_for(username, self._user_db_path(user))
+        if config.storage_is_cloud():
+            sink = service_module.CloudSink(username)
+        else:
+            sink = service_module.SQLiteSink(self._user_db_path(user))
+        key = f"{config.STORAGE_BACKEND}:{username}"
+        with self.server._scrape_lock:
+            svc = self.server._scrape_services.get(key)
+            if svc is None:
+                svc = ScrapeService(sink=sink)
+                self.server._scrape_services[key] = svc
+            return svc
 
     def _resolve_api_key(self, query: dict | None, user: dict | None) -> str:
         """Key 解析顺序：请求头 X-API-Key → ?apikey= → 登录用户保存的 Key。"""
@@ -225,10 +241,16 @@ class Handler(BaseHTTPRequestHandler):
         return db.get_site_origin(self._user_db_path(user))
 
     def _ensure_login(self) -> dict | None:
-        """要求登录；未登录返回 None 并发送 401。"""
+        """要求登录；未登录返回 None 并发送 401。
+
+        云端模式必须先登录才能用任何业务接口；本地模式允许匿名（门禁兼容）。
+        """
         user = self._current_user()
         if not user:
-            self._error("请先登录", 401)
+            if config.storage_is_cloud():
+                self._error("云端模式必须先登录", 401)
+            else:
+                self._error("请先登录", 401)
             return None
         return user
 
@@ -280,12 +302,31 @@ class Handler(BaseHTTPRequestHandler):
             return f"{SESSION_COOKIE}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}"
         return f"{SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"
 
+    # 云端模式：这些路径允许匿名访问（静态资源、认证接口、同步状态）
+    _PUBLIC_PATHS = ("/", "/index.html", "/favicon.ico", "/static/", "/covers/",
+                     "/api/auth/me", "/api/auth/register", "/api/auth/login",
+                     "/api/auth/logout", "/api/sync/status", "/api/meta")
+
+    def _cloud_login_guard(self, path: str) -> bool:
+        """云端模式强制登录：返回 True 表示已放行（或非云模式），
+        False 表示应拒绝（已发 401）。"""
+        if not config.storage_is_cloud():
+            return True
+        if any(path == p or path.startswith(p) for p in self._PUBLIC_PATHS):
+            return True
+        if not self._current_user():
+            self._error("云端模式必须先登录", 401)
+            return False
+        return True
+
     # ---------- GET ----------
     def do_GET(self) -> None:
         try:
             parts = urlsplit(self.path)
             path = parts.path
             query = parse_qs(parts.query)
+            if not self._cloud_login_guard(path):
+                return
             if path in ("/", "/index.html"):
                 self._serve_file(self.server.web_dir / "index.html")
             elif path.startswith("/static/"):
@@ -915,6 +956,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             path = urlsplit(self.path).path
+            if not self._cloud_login_guard(path):
+                return
             if path == "/api/auth/register":
                 self._handle_register()
             elif path == "/api/auth/login":
@@ -925,6 +968,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._handle_credentials()
             elif path == "/api/sync":
                 self._handle_sync()
+            elif path == "/api/sync/pull":
+                self._handle_sync_pull()
+            elif path == "/api/sync/push":
+                self._handle_sync_push()
             elif path == "/api/scrape":
                 self._handle_scrape()
             elif path == "/api/scrape/cancel":
@@ -1181,16 +1228,56 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json({"ok": True, **result})
 
+    def _handle_sync_pull(self) -> None:
+        """拉取远程数据：从云端拉该用户作品/批次，insert 或 update（1 覆盖 0）进本地。"""
+        user = self._ensure_login()
+        if not user:
+            return
+        if config.storage_is_cloud():
+            self._json({"ok": True, "cloud_mode": True,
+                        "message": "当前为云模式：数据直连云端，无需同步"})
+            return
+        if not supabase_client.configured():
+            self._error("未配置云端数据库：请在 .env 里填写 CLAW_SUPABASE_PROJECT_REF 与 CLAW_SUPABASE_TOKEN", 400)
+            return
+        username = user["username"]
+        user_db = db.user_db_path(username)
+        try:
+            result = supabase_client.pull_user(username, user_db)
+        except supabase_client.SupabaseError as exc:
+            self._error(str(exc), exc.status or 502)
+            return
+        self._json({"ok": True, **result})
+
+    def _handle_sync_push(self) -> None:
+        """推送覆盖远程数据：把本地作品/批次 insert 或 update（1 覆盖 0）覆盖到远端。"""
+        user = self._ensure_login()
+        if not user:
+            return
+        if config.storage_is_cloud():
+            self._json({"ok": True, "cloud_mode": True,
+                        "message": "当前为云模式：数据直连云端，无需同步"})
+            return
+        if not supabase_client.configured():
+            self._error("未配置云端数据库：请在 .env 里填写 CLAW_SUPABASE_PROJECT_REF 与 CLAW_SUPABASE_TOKEN", 400)
+            return
+        username = user["username"]
+        user_db = db.user_db_path(username)
+        try:
+            result = supabase_client.push_user_data(username, user_db)
+        except supabase_client.SupabaseError as exc:
+            self._error(str(exc), exc.status or 502)
+            return
+        self._json({"ok": True, **result})
+
     # ---------- 抓取 / 标记 / 下载 ----------
     def _handle_scrape(self) -> None:
         payload = self._read_json()
         if payload is None:
             return
         user = self._current_user()
-        # 云模式：抓取需要本机代理/限速状态，本期禁用；请在本地模式设备抓取后同步
-        if config.storage_is_cloud():
-            self._error("云模式暂不支持抓取：请在本地模式设备抓取并同步", 400)
-            return
+        # 抓取在两种模式下都可用：本地模式写用户 SQLite，云模式（CloudSink）直接写云端。
+        # 出网走 config.effective_proxy()（云 VPS 可直连，本地走 10808 代理）。
         service = self._scrape_service(user)
         try:
             state = service.start(

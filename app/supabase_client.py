@@ -344,20 +344,40 @@ def _row_values(row, table):
 
 
 def _upsert_sql(table):
+    """构造推送用的 upsert SQL。
+
+    galleries：标记字段用 ``GREATEST(本地, excluded)`` 合并（1 覆盖 0），
+    内容字段仅当 excluded.last_seen >= 本地时覆盖，时间戳取极值；
+    不再用 WHERE 守卫跳过整行 —— 标记始终合并。
+    scrape_runs：按时间较新者胜（原有守卫不变）。
+    """
     columns = db.columns_for(table)
     cols = ", ".join(_ident(col) for col in columns)
     conflict = '("username", "gallery_id")' if table == "galleries" else '("username", "url")'
+    if table == "galleries":
+        mark_set = ", ".join(
+            f'{_ident(c)} = GREATEST(public.{_q(table)}.{_ident(c)}, excluded.{_ident(c)})'
+            for c in db._GALLERY_MARK_COLUMNS)
+        content_set = ", ".join(
+            f'{_ident(c)} = CASE WHEN excluded."last_seen" >= public.{_q(table)}."last_seen" '
+            f"THEN excluded.{_ident(c)} ELSE public.{_q(table)}.{_ident(c)} END"
+            for c in db._GALLERY_CONTENT_COLUMNS)
+        time_set = (
+            f'"first_seen" = LEAST(public.{_q(table)}."first_seen", excluded."first_seen"), '
+            f'"last_seen" = GREATEST(public.{_q(table)}."last_seen", excluded."last_seen")')
+        updates = ", ".join(p for p in (mark_set, content_set, time_set) if p)
+        return (
+            f"insert into public.{_q(table)} (\"username\", {cols}) values {{values}} "
+            f"on conflict {conflict} do update set {updates}, \"synced_at\" = now()"
+        )
     updates = ", ".join(
         f"{_ident(col)} = excluded.{_ident(col)}" for col in columns if col != "username"
     )
-    if table == "galleries":
-        guard = f'excluded."last_seen" >= public.{_q(table)}."last_seen"'
-    else:
-        guard = (
-            "coalesce(nullif(excluded.\"finished_at\", ''), nullif(excluded.\"started_at\", ''), '') >= "
-            f"coalesce(nullif(public.{_q(table)}.\"finished_at\", ''), "
-            f"nullif(public.{_q(table)}.\"started_at\", ''), '')"
-        )
+    guard = (
+        "coalesce(nullif(excluded.\"finished_at\", ''), nullif(excluded.\"started_at\", ''), '') >= "
+        f"coalesce(nullif(public.{_q(table)}.\"finished_at\", ''), "
+        f"nullif(public.{_q(table)}.\"started_at\", ''), '')"
+    )
     return (
         f"insert into public.{_q(table)} (\"username\", {cols}) values {{values}} "
         f"on conflict {conflict} do update set {updates}, \"synced_at\" = now() "
@@ -456,31 +476,61 @@ def fetch_user(username):
     }
 
 
-def sync_user(username, local_path=None, *, pull=True, push=True):
-    """把当前用户的爬取记录在本地与云端之间做一次双向同步。"""
+def pull_user(username, local_path=None):
+    """拉取：从云端拉该用户全部作品/批次，insert 或 update（1 覆盖 0）进本地。"""
     _require_config()
     ensure_tables()
     cloud = fetch_user(username)
-    pulled = {"galleries": 0, "runs": 0}
-    if pull:
-        pulled["galleries"] = db.upsert_gallery_rows_from_cloud(cloud["galleries"], local_path)
-        pulled["runs"] = db.upsert_run_rows_from_cloud(cloud["runs"], local_path)
-    pushed = {"galleries": 0, "runs": 0}
-    if push:
-        limit = config.SUPABASE_SYNC_MAX_ROWS
-        local_galleries = db.all_gallery_rows(local_path)[:limit]
-        local_runs = db.all_run_rows(local_path)[:limit]
-        pushed = push_user(username, local_galleries, local_runs)
+    pulled = {
+        "galleries": db.upsert_gallery_rows_from_cloud(cloud["galleries"], local_path),
+        "runs": db.upsert_run_rows_from_cloud(cloud["runs"], local_path),
+    }
     return {
         "username": username,
         "cloud": {"galleries": len(cloud["galleries"]), "runs": len(cloud["runs"])},
         "pulled": pulled,
-        "pushed": pushed,
         "local": {
             "galleries": len(db.all_gallery_rows(local_path)),
             "runs": len(db.all_run_rows(local_path)),
         },
     }
+
+
+def push_user_data(username, local_path=None):
+    """推送：把本地全部作品/批次 insert 或 update（1 覆盖 0）覆盖到远端。"""
+    _require_config()
+    ensure_tables()
+    limit = config.SUPABASE_SYNC_MAX_ROWS
+    local_galleries = db.all_gallery_rows(local_path)[:limit]
+    local_runs = db.all_run_rows(local_path)[:limit]
+    pushed = push_user(username, local_galleries, local_runs)
+    return {
+        "username": username,
+        "pushed": pushed,
+        "local": {"galleries": len(local_galleries), "runs": len(local_runs)},
+    }
+
+
+def sync_user(username, local_path=None, *, pull=True, push=True):
+    """双向同步（拉取 + 推送一次性完成）。保留兼容旧 /api/sync。"""
+    _require_config()
+    ensure_tables()
+    result = {"username": username,
+              "pulled": {"galleries": 0, "runs": 0},
+              "pushed": {"galleries": 0, "runs": 0},
+              "cloud": {"galleries": 0, "runs": 0},
+              "local": {"galleries": 0, "runs": 0}}
+    if pull:
+        r = pull_user(username, local_path)
+        result["pulled"] = r["pulled"]
+        result["cloud"] = r["cloud"]
+        result["local"] = r["local"]
+    if push:
+        r = push_user_data(username, local_path)
+        result["pushed"] = r["pushed"]
+        if not pull:
+            result["local"] = r["local"]
+    return result
 
 
 def push_user_credentials(username, *, api_key, site_origin,

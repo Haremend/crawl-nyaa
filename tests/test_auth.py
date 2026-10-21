@@ -120,17 +120,19 @@ class AuthAndIsolationTests(unittest.TestCase):
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
-        # 快照全局 Supabase 配置（本文件其他测试可能已改），统一在 tearDown 恢复
+        # 快照全局 Supabase 配置与存储模式（本文件其他测试可能已改），统一在 tearDown 恢复
         self._sb_snapshot = (
             supabase_client.config.SUPABASE_PROJECT_REF,
             supabase_client.config.SUPABASE_TOKEN,
             supabase_client.config.SUPABASE_API_URL,
             supabase_client.config.SUPABASE_DB_URL,
             supabase_client.config.SUPABASE_TIMEOUT,
+            supabase_client.config.STORAGE_BACKEND,
         )
-        # 隔离本测试类：强制「未配置云端」，注册/登录的回退路径不触网
+        # 隔离本测试类：强制「未配置云端」+ 本地存储模式，注册/登录回退路径不触网
         supabase_client.config.SUPABASE_PROJECT_REF = ""
         supabase_client.config.SUPABASE_TOKEN = ""
+        supabase_client.config.STORAGE_BACKEND = "local"
         supabase_client.set_transport(None)
 
     def tearDown(self):
@@ -143,7 +145,8 @@ class AuthAndIsolationTests(unittest.TestCase):
     def _restore_supabase(self):
         supabase_client.config.SUPABASE_PROJECT_REF, supabase_client.config.SUPABASE_TOKEN, \
             supabase_client.config.SUPABASE_API_URL, supabase_client.config.SUPABASE_DB_URL, \
-            supabase_client.config.SUPABASE_TIMEOUT = self._sb_snapshot
+            supabase_client.config.SUPABASE_TIMEOUT, \
+            supabase_client.config.STORAGE_BACKEND = self._sb_snapshot
         supabase_client.set_transport(None)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -264,17 +267,19 @@ class SyncStatusTests(unittest.TestCase):
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
-        # 快照全局 Supabase 配置（本文件其他测试可能已改），统一在 tearDown 恢复
+        # 快照全局 Supabase 配置与存储模式（本文件其他测试可能已改），统一在 tearDown 恢复
         self._sb_snapshot = (
             supabase_client.config.SUPABASE_PROJECT_REF,
             supabase_client.config.SUPABASE_TOKEN,
             supabase_client.config.SUPABASE_API_URL,
             supabase_client.config.SUPABASE_DB_URL,
             supabase_client.config.SUPABASE_TIMEOUT,
+            supabase_client.config.STORAGE_BACKEND,
         )
         # 本测试类验证「未配置云端」语义，强制清空（与本文件其他测试隔离）
         supabase_client.config.SUPABASE_PROJECT_REF = ""
         supabase_client.config.SUPABASE_TOKEN = ""
+        supabase_client.config.STORAGE_BACKEND = "local"
         supabase_client.set_transport(None)
 
     def tearDown(self):
@@ -287,7 +292,8 @@ class SyncStatusTests(unittest.TestCase):
     def _restore_supabase(self):
         supabase_client.config.SUPABASE_PROJECT_REF, supabase_client.config.SUPABASE_TOKEN, \
             supabase_client.config.SUPABASE_API_URL, supabase_client.config.SUPABASE_DB_URL, \
-            supabase_client.config.SUPABASE_TIMEOUT = self._sb_snapshot
+            supabase_client.config.SUPABASE_TIMEOUT, \
+            supabase_client.config.STORAGE_BACKEND = self._sb_snapshot
         supabase_client.set_transport(None)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -314,11 +320,13 @@ class SyncFlowTests(unittest.TestCase):
         self._orig_user_data_dir = db.config.USER_DATA_DIR
         db.config.USER_DATA_DIR = self.tmp / "users"
         db.init_db(self.db_path)
-        # 让 supabase_client 认为已配置
+        # 让 supabase_client 认为已配置（本地存储模式 + FakeTransport）
         self._orig_ref = supabase_client.config.SUPABASE_PROJECT_REF
         self._orig_tok = supabase_client.config.SUPABASE_TOKEN
+        self._orig_backend = supabase_client.config.STORAGE_BACKEND
         supabase_client.config.SUPABASE_PROJECT_REF = "test-project"
         supabase_client.config.SUPABASE_TOKEN = "test-token"
+        supabase_client.config.STORAGE_BACKEND = "local"
         self.fake = FakeTransport()
         supabase_client.set_transport(self.fake)
         self.server = ApiServer(("127.0.0.1", 0), Handler, db_path=self.db_path)
@@ -333,6 +341,7 @@ class SyncFlowTests(unittest.TestCase):
         db.config.USER_DATA_DIR = self._orig_user_data_dir
         supabase_client.config.SUPABASE_PROJECT_REF = self._orig_ref
         supabase_client.config.SUPABASE_TOKEN = self._orig_tok
+        supabase_client.config.STORAGE_BACKEND = self._orig_backend
         supabase_client.set_transport(None)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -520,6 +529,55 @@ class OldDbCompatTests(unittest.TestCase):
             self.assertIn("origin", cols)
         finally:
             conn.close()
+
+
+class CloudScrapeSinkTests(unittest.TestCase):
+    """云模式：抓取经 CloudSink 直接写云端（不落本地 SQLite）的语义锁定。"""
+
+    def setUp(self):
+        self.tmp = make_temp_dir("cloudsink")
+        self._sb_snapshot = (
+            supabase_client.config.SUPABASE_PROJECT_REF,
+            supabase_client.config.SUPABASE_TOKEN,
+            supabase_client.config.STORAGE_BACKEND,
+        )
+        supabase_client.config.SUPABASE_PROJECT_REF = "test-project"
+        supabase_client.config.SUPABASE_TOKEN = "test-token"
+        supabase_client.config.STORAGE_BACKEND = "cloud"
+        self.fake = FakeTransport()
+        supabase_client.set_transport(self.fake)
+
+    def tearDown(self):
+        supabase_client.config.SUPABASE_PROJECT_REF, supabase_client.config.SUPABASE_TOKEN, \
+            supabase_client.config.STORAGE_BACKEND = self._sb_snapshot
+        supabase_client.set_transport(None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_cloud_sink_writes_to_cloud_not_local(self):
+        from app import service as svc
+        sink = svc.CloudSink(username="alice")
+        result = sink.upsert_items(
+            [GalleryItem(gallery_id=55001, url="https://example.net/g/55001/",
+                         title="Cloud scrape", languages=["japanese"],
+                         title_key="cloudscrape")],
+            source_url="https://example.net/group/x/", batch_id=9001)
+        self.assertEqual(result["new"], 1)
+        # 数据落进 FakeTransport 记录的云端（而非本地 SQLite）
+        self.assertTrue(any(s.lower().startswith('insert into public."claw_galleries"')
+                            for s in self.fake.statements))
+
+    def test_cloud_sink_existing_id_is_dup(self):
+        from app import service as svc
+        self.fake.galleries["alice"] = [{
+            "gallery_id": 55002, "title": "Exist", "last_seen": "2026-01-01T00:00:00+00:00",
+        }]
+        sink = svc.CloudSink(username="alice")
+        result = sink.upsert_items(
+            [GalleryItem(gallery_id=55002, url="https://example.net/g/55002/",
+                         title="Exist", languages=["japanese"], title_key="exist")],
+            source_url="https://example.net/group/x/", batch_id=9002)
+        self.assertEqual(result["new"], 0)
+        self.assertEqual(result["dup"], 1)
 
 
 if __name__ == "__main__":

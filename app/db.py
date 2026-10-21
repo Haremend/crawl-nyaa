@@ -1679,6 +1679,16 @@ _GALLERY_INT_COLUMNS = (
     "site_favorite", "from_scrape", "batch_id", "num_pages", "num_favorites",
 )
 
+# 用户操作标记：同步合并时「1 覆盖 0」（done 覆盖 todo，逻辑删除覆盖未删除）。
+# 即 max(本地, 云端) —— 任一方为 1 则结果为 1，不受 last_seen 影响。
+_GALLERY_MARK_COLUMNS = ("want_download", "downloaded", "hidden", "site_favorite")
+
+# 内容字段（非标记、非主键、非时间戳）：较新者胜（excluded.last_seen >= 本地时才覆盖）
+_GALLERY_CONTENT_COLUMNS = tuple(
+    c for c in _GALLERY_COLUMNS
+    if c != "gallery_id" and c not in _GALLERY_MARK_COLUMNS and c not in ("last_seen", "first_seen")
+)
+
 _RUN_COLUMNS = ["url", "status", "started_at", "finished_at", "pages_total", "pages_done",
                 "items_seen", "items_new", "items_dup", "error"]
 
@@ -1718,23 +1728,37 @@ def row_updated_at(row: dict, table: str) -> str:
 
 
 def upsert_gallery_rows_from_cloud(rows: Iterable[dict], path: str | Path | None = None) -> int:
-    """把云端作品行合并进本地：主键 gallery_id，last_seen 更新者胜。
+    """把云端作品行合并进本地（需求：标记字段 1 覆盖 0）。
 
-    返回本次处理的云端行数（合并 = 插入或更新到更新者胜）。
-    云端与本地时间戳格式一致（ISO-8601 UTC），因此可以直接做字符串比较。
-    用「处理的行数」而不是 cursor.rowcount，因为 SQLite 的 executemany
-    对 ON CONFLICT...WHERE 的 rowcount 报告不可靠（常报 0/-1）。
+    - 新 gallery_id：直接 INSERT。
+    - 已存在：标记字段（want_download/downloaded/hidden/site_favorite）
+      ``max(本地, 云端)`` 合并 —— 任一方为 1 则结果 1（done 覆盖 todo，
+      逻辑删除覆盖未删除），不受 last_seen 影响。
+    - 内容字段：仅当 ``excluded.last_seen >= galleries.last_seen`` 时覆盖。
+    - first_seen 取较旧、last_seen 取较新。
+
+    返回本次处理的云端行数。
     """
     items = [r for r in rows if _optional_int(r.get("gallery_id"))]
     if not items:
         return 0
     cols = ", ".join(_GALLERY_COLUMNS)
     marks = ", ".join("?" for _ in _GALLERY_COLUMNS)
-    updates = ", ".join(f"{c} = excluded.{c}" for c in _GALLERY_COLUMNS if c != "gallery_id")
+    mark_set = ", ".join(
+        f"{c} = max(galleries.{c}, excluded.{c})" for c in _GALLERY_MARK_COLUMNS)
+    content_set = ", ".join(
+        f"{c} = CASE WHEN excluded.last_seen >= galleries.last_seen "
+        f"THEN excluded.{c} ELSE galleries.{c} END"
+        for c in _GALLERY_CONTENT_COLUMNS)
+    time_set = (
+        "first_seen = CASE WHEN excluded.first_seen < galleries.first_seen "
+        "THEN excluded.first_seen ELSE galleries.first_seen END, "
+        "last_seen = CASE WHEN excluded.last_seen >= galleries.last_seen "
+        "THEN excluded.last_seen ELSE galleries.last_seen END")
+    updates = ", ".join(p for p in (mark_set, content_set, time_set) if p)
     sql = (
         f"INSERT INTO galleries ({cols}) VALUES ({marks}) "
-        f"ON CONFLICT(gallery_id) DO UPDATE SET {updates} "
-        f"WHERE excluded.last_seen > galleries.last_seen"
+        f"ON CONFLICT(gallery_id) DO UPDATE SET {updates}"
     )
     with _WRITE_LOCK:
         conn = connect(path)

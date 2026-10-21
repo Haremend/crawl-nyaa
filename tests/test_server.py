@@ -32,6 +32,13 @@ def make_temp_dir(prefix: str) -> Path:
 class ServerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # 锁定本地模式 + 未配置 Supabase（防止 .env 的真实 PAT / 云默认值泄漏进测试）
+        from app import config as _c, supabase_client as _s
+        _c.STORAGE_BACKEND = "local"
+        _c.SUPABASE_PROJECT_REF = ""
+        _c.SUPABASE_TOKEN = ""
+        _s.set_transport(None)
+        cls._cfg = (_c.STORAGE_BACKEND, _c.SUPABASE_PROJECT_REF, _c.SUPABASE_TOKEN)
         cls.tmp = make_temp_dir("server")
         cls.db_path = cls.tmp / "server.sqlite3"
         db.init_db(cls.db_path)
