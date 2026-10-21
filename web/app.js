@@ -444,10 +444,14 @@ async function api(path, options = {}) {
   let data = {};
   try { data = await response.json(); } catch (error) { /* 非 JSON */ }
   if (response.status === 401) {
+    const cloudMode = state.meta && state.meta.storage_backend === "cloud";
     // 登录用户的 401 = 保存的 Key 缺失/失效，引导去设置；匿名用户才弹门禁
     if (state.user) {
       toast("需要 API Key：请在设置里填写站点域名与 Key", "error");
       openSettingsModal();
+    } else if (cloudMode) {
+      // 云模式未登录：401 = 必须先登录，不弹 API Key 门禁
+      openAuthModal("login");
     } else {
       showGate("需要有效的 API Key 才能继续。");
     }
@@ -763,7 +767,10 @@ function renderPager(data) {
  * 我的收藏（站点）
  * ================================================================== */
 async function loadFavorites(page = 1) {
-  if (!state.user && !state.key) { showGate(); return; }
+  if (!state.user && !state.key) {
+    if (state.meta && state.meta.storage_backend === "cloud") { openAuthModal("login"); return; }
+    showGate(); return;
+  }
   const params = new URLSearchParams({ page: String(page) });
   if (state.favQuery) params.set("q", state.favQuery);
   const data = await api("/api/site-favorites?" + params.toString());
@@ -804,7 +811,10 @@ async function setHidden(ids, flag) {
 }
 
 async function syncFavoritesToWant() {
-  if (!state.user && !state.key) { showGate(); return; }
+  if (!state.user && !state.key) {
+    if (state.meta && state.meta.storage_backend === "cloud") { openAuthModal("login"); return; }
+    showGate(); return;
+  }
   if (!window.confirm("将站点账号收藏列表中的全部作品，在本地数据库标记为「待下载」？")) return;
   $("favSyncBtn").disabled = true;
   try {
@@ -1400,9 +1410,16 @@ function bindEvents() {
   // 匿名模式兼容：URL ?apikey= / cookie 里的 Key 仍然可用
   initApiKey();
   await loadMeta().catch(() => {});
+  const cloudMode = state.meta && state.meta.storage_backend === "cloud";
   if (state.user) {
     hideGate();
     try { await loadWorks(); } catch (error) { toast("加载失败：" + error.message, "error"); }
+    return;
+  }
+  if (cloudMode) {
+    // 云模式：必须先登录，不弹 API Key 门禁，直接引导到登录/注册
+    hideGate();
+    openAuthModal("login");
     return;
   }
   if (!state.key) {
