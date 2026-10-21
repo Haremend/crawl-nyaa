@@ -231,7 +231,15 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     """打开数据库连接（每次调用独立连接，配合 WAL 支持多线程）。"""
     db_path = Path(path) if path else config.DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), timeout=30)
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=30)
+    except sqlite3.OperationalError as exc:
+        # 常见原因：父目录建不了（权限/磁盘只读/路径不对）、文件系统只读。
+        # 把路径与原始错误一起抛，避免「unable to open database file」无头绪。
+        raise sqlite3.OperationalError(
+            f"无法打开数据库 {db_path}（父目录 {db_path.parent}，"
+            f"请确认该目录可写、磁盘未只读、路径存在）：{exc}"
+        ) from exc
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
