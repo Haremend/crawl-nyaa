@@ -15,7 +15,8 @@ from app.upstream import UpstreamClient, UpstreamError
 
 
 def list_site_favorites(api_key: str, user: dict | None, user_db: Path,
-                        origin: str, page: int, keyword: str) -> dict:
+                        origin: str, page: int, keyword: str,
+                        upstream=None) -> dict:
     """站点收藏列表：拉取 + 同步进本地库，返回 controller 直接 _json 的 dict。
 
     出错返回 {"ok": False, "error", "status"}；成功返回与拆分前
@@ -24,7 +25,7 @@ def list_site_favorites(api_key: str, user: dict | None, user_db: Path,
     payload，controller 负责二次装饰 —— 见 server._ordered_by_ids）。
     """
     try:
-        payload = UpstreamClient(origin, api_key).list_favorites(page=page, query=keyword)
+        payload = upstream(origin, api_key).list_favorites(page=page, query=keyword)
     except UpstreamError as exc:
         return {"ok": False, "error": str(exc), "status": exc.status or 502}
 
@@ -49,9 +50,9 @@ def list_site_favorites(api_key: str, user: dict | None, user_db: Path,
 
 
 def sync_to_want(api_key: str, user: dict | None, user_db: Path,
-                 origin: str) -> dict:
+                 origin: str, upstream=None) -> dict:
     """遍历收藏所有页，把全部收藏作品在本地标记为「待下载」。"""
-    client = UpstreamClient(origin, api_key)
+    client = upstream(origin, api_key)
     synced = 0
     page = 1
     while True:
