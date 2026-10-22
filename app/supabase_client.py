@@ -20,11 +20,21 @@
 from __future__ import annotations
 
 import json
+import sys
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Iterable
 
 from . import config, db
+
+
+def _sb_log(*parts) -> None:
+    """Supabase 请求耗时日志：打到 stderr（不进响应/前端）。
+    **只记** host / read_only / 状态 / 耗时 ms，**绝不打 SQL 文本**——
+    SQL 里可能含 push_user_credentials 的 api_key 字面量（AGENTS.md §1.2）。"""
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+    print(f"{ts}Z [cloud] " + " ".join(str(p) for p in parts), file=sys.stderr)
 
 
 class SupabaseError(RuntimeError):
@@ -101,6 +111,8 @@ class Transport:
                 "User-Agent": config.USER_AGENT,
             },
         )
+        host = self.api_url.replace("https://", "").replace("http://", "")
+        started = time.monotonic()
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 raw = response.read().decode("utf-8", "replace")
@@ -110,13 +122,22 @@ class Transport:
                 detail = exc.read().decode("utf-8", "replace")[:400]
             except Exception:  # pragma: no cover - 读取失败也不该崩
                 detail = ""
+            _sb_log(f"Supabase {host} read_only={read_only} 失败 HTTP {exc.code} "
+                    f"耗时={int((time.monotonic() - started) * 1000)}ms")
             raise SupabaseError(
                 f"云端返回 HTTP {exc.code}：{detail or exc.reason}", exc.code
             ) from exc
         except urllib.error.URLError as exc:
+            _sb_log(f"Supabase {host} read_only={read_only} 连接失败 "
+                    f"耗时={int((time.monotonic() - started) * 1000)}ms: {exc.reason}")
             raise SupabaseError(f"无法连接云端数据库：{exc.reason}", 0) from exc
         except OSError as exc:
+            _sb_log(f"Supabase {host} read_only={read_only} 连接失败 "
+                    f"耗时={int((time.monotonic() - started) * 1000)}ms: {exc}")
             raise SupabaseError(f"无法连接云端数据库：{exc}", 0) from exc
+        elapsed = int((time.monotonic() - started) * 1000)
+        _sb_log(f"Supabase {host} read_only={read_only} 成功 耗时={elapsed}ms "
+                f"返回={len(raw)}字节")
         if not raw.strip():
             return []
         try:
@@ -460,7 +481,11 @@ def fetch_user(username):
     _require_config()
     name = _literal(str(username))
     gallery_cols = ", ".join(_ident(col) for col in db.columns_for("galleries"))
-    run_cols = ", ".join(_ident(col) for col in db.columns_for("scrape_runs"))
+    # 云端读路径补上 run_id（_RUN_COLUMNS 是同步推送列，不含 run_id，否则
+    # 本地 autoincrement run_id 会被推到云端覆盖时间戳 run_id）。云端表有
+    # run_id 列、_normalize_run_row 也已处理，只是 SELECT 要把它选出来，
+    # 否则批次下拉显示 undefined、works 计数为 0。
+    run_cols = ", ".join(_ident(col) for col in ("run_id", *db.columns_for("scrape_runs")))
     galleries = run_sql(
         f"select {gallery_cols} from public.{_q(GALLERIES_TABLE)} "
         f"where \"username\" = {name}",

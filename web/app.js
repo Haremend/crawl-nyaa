@@ -25,7 +25,6 @@ const state = {
   localRunning: false,
   batchId: "",
   batches: [],
-  batchSearch: "",
   favPage: 1,
   favQuery: "",
   favData: null,
@@ -405,22 +404,22 @@ function fmtDate(iso) {
   return Number.isNaN(date.getTime()) ? String(iso).slice(0, 10) : date.toLocaleDateString("zh-CN");
 }
 
-/* ---------- 全局加载遮罩 ----------
+/* ---------- 顶部状态栏加载转圈圈 ----------
  * 用计数处理并发请求；请求很快时（<120ms）不显示，避免闪烁。
+ * 不再用全屏遮罩（登录后每次筛选/翻页/标记都弹遮罩，太干扰），改为顶栏
+ * 最左边一个小转圈圈，不阻塞交互；loadingText 仅作为 title 悬停提示。
  */
 let loadingCount = 0;
 let loadingTimer = null;
-let loadingShownAt = 0;
 
 function showLoading(text) {
   loadingCount += 1;
-  if (loadingTimer || !$("loadingOverlay").hidden) return;
+  if (loadingTimer) return;
   loadingTimer = window.setTimeout(() => {
     loadingTimer = null;
     if (loadingCount <= 0) return;
-    $("loadingText").textContent = text || "加载中…";
-    $("loadingOverlay").hidden = false;
-    loadingShownAt = Date.now();
+    const el = $("topSpinner");
+    if (el) { el.title = text || "加载中…"; el.hidden = false; }
   }, 120);
 }
 
@@ -428,13 +427,8 @@ function hideLoading() {
   loadingCount = Math.max(0, loadingCount - 1);
   if (loadingCount > 0) return;
   if (loadingTimer) { window.clearTimeout(loadingTimer); loadingTimer = null; }
-  const shownFor = Date.now() - loadingShownAt;
-  const finish = () => { $("loadingOverlay").hidden = true; };
-  if (!$("loadingOverlay").hidden && shownFor < 250) {
-    window.setTimeout(finish, 250 - shownFor);
-  } else {
-    finish();
-  }
+  const el = $("topSpinner");
+  if (el) el.hidden = true;
 }
 
 async function api(path, options = {}) {
@@ -572,11 +566,9 @@ function batchLabel(batch) {
 
 function renderBatchOptions() {
   const select = $("batchSelect");
-  const keyword = (state.batchSearch || "").toLowerCase();
   const options = ['<option value="">全部批次</option>'];
   for (const batch of state.batches) {
     const label = batchLabel(batch);
-    if (keyword && !label.toLowerCase().includes(keyword)) continue;
     const selected = String(batch.run_id) === String(state.batchId) ? " selected" : "";
     options.push('<option value="' + batch.run_id + '"' + selected + ">" + esc(label) + "</option>");
   }
@@ -1269,10 +1261,6 @@ function bindEvents() {
   });
 
   $("batchSelect").addEventListener("change", (event) => applyBatch(event.target.value));
-  $("batchSearch").addEventListener("input", (event) => {
-    state.batchSearch = event.target.value;
-    renderBatchOptions();
-  });
 
   document.querySelectorAll(".save-mode-btn").forEach((btn) => {
     btn.addEventListener("click", () => {

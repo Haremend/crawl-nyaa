@@ -38,6 +38,7 @@
 
 <header class="topbar">
   <div class="brand">
+    <span class="top-spinner" id="topSpinner" hidden title="加载中…"></span>
     <div class="logo">🦞</div>
     <div>
       <h1>claw-gallery</h1>
@@ -59,13 +60,9 @@
 </header>
 
 <main>
-  <!-- ============ 批次号（顶部下拉搜索） ============ -->
+  <!-- ============ 批次号（顶部下拉过滤） ============ -->
   <section class="panel batch-panel">
     <div class="batch-row">
-      <label class="field batch-search">
-        <span>批次号</span>
-        <input id="batchSearch" type="search" placeholder="输入批次号或来源 URL 过滤…" autocomplete="off">
-      </label>
       <label class="field batch-select">
         <span>选择批次</span>
         <select id="batchSelect"><option value="">全部批次</option></select>
@@ -242,13 +239,7 @@
   <nav class="pager" id="pager"></nav>
 </main>
 
-<!-- ============ 全局加载遮罩 ============ -->
-<div class="loading-overlay" id="loadingOverlay" hidden>
-  <div class="loading-box">
-    <span class="spinner"></span>
-    <span class="loading-text" id="loadingText">加载中…</span>
-  </div>
-</div>
+<!-- 加载指示已改为顶栏最左边的转圈圈 #topSpinner（不再用全屏遮罩） -->
 
 <div id="toast" class="toast" hidden></div>
 

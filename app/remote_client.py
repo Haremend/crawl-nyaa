@@ -15,13 +15,22 @@ C 端（本地模式）设了 ``CLAW_REMOTE_BASE`` 之后，登录/注册/拉取
 """
 from __future__ import annotations
 
+import datetime
 import json
 import ssl
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from . import config
+
+
+def _log(*parts) -> None:
+    """打 stderr：记脱敏字段（base / method / path / HTTP 状态 / 错误摘要），
+    **不打** 请求体——里面带账号 API Key（AGENTS.md §1.2：Key 不得写日志）。"""
+    ts = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    print(f"[{ts}] [cloud] " + " ".join(str(p) for p in parts), file=sys.stderr)
 
 
 class RemoteError(RuntimeError):
@@ -93,8 +102,15 @@ class RemoteClient:
     def fetch_account(self, username: str):
         """拉某个用户的云端账号行（形状同 supabase_client._account_row）。"""
         q = urllib.parse.urlencode({"username": username})
-        data = self._request("GET", f"/api/remote/account?{q}")
-        return data.get("account")
+        _log(f"C 端→VPS 拉取账号 {self.base} user={username}")
+        try:
+            data = self._request("GET", f"/api/remote/account?{q}")
+        except RemoteError as exc:
+            _log(f"拉取账号失败 user={username}: {exc} (HTTP {exc.status})")
+            raise
+        account = data.get("account")
+        _log(f"拉取账号完成 user={username} 命中={'是' if account else '否'}")
+        return account
 
     def upsert_account(self, username: str, *, api_key: str, site_origin: str,
                        password_hash: str, salt: str, created_at: str) -> dict:
@@ -103,19 +119,43 @@ class RemoteClient:
             "username": username, "api_key": api_key, "site_origin": site_origin,
             "password_hash": password_hash, "salt": salt, "created_at": created_at,
         }
-        return self._request("POST", "/api/remote/account", payload=payload)
+        _log(f"C 端→VPS upsert 账号 {self.base} user={username} "
+             f"api_key=({'有' if api_key else '无'}) site_origin={site_origin or '-'}")
+        try:
+            res = self._request("POST", "/api/remote/account", payload=payload)
+        except RemoteError as exc:
+            _log(f"upsert 账号失败 user={username}: {exc} (HTTP {exc.status})")
+            raise
+        _log(f"upsert 账号完成 user={username}")
+        return res
 
     def pull(self, username: str) -> dict:
         """从远端拉该用户全部作品/批次行，返回 {galleries, runs, counts}。"""
-        data = self._request("POST", "/api/remote/sync",
-                             payload={"username": username, "direction": "pull"})
+        _log(f"C 端→VPS 拉取作品/批次 {self.base} user={username}")
+        try:
+            data = self._request("POST", "/api/remote/sync",
+                                 payload={"username": username, "direction": "pull"})
+        except RemoteError as exc:
+            _log(f"拉取作品/批次失败 user={username}: {exc} (HTTP {exc.status})")
+            raise
+        counts = data.get("counts") or {}
+        _log(f"拉取完成 user={username} 作品={counts.get('galleries', 0)} 批次={counts.get('runs', 0)}")
         return data
 
     def push(self, username: str, galleries: list, runs: list) -> dict:
         """把本地行推给远端做云端合并，返回 {pushed:{galleries,runs}}。"""
-        payload = {"username": username, "direction": "push",
-                   "galleries": galleries, "runs": runs}
-        return self._request("POST", "/api/remote/sync", payload=payload)
+        _log(f"C 端→VPS 推送作品/批次 {self.base} user={username} "
+             f"推送作品={len(galleries)} 批次={len(runs)}")
+        try:
+            res = self._request("POST", "/api/remote/sync",
+                                payload={"username": username, "direction": "push",
+                                         "galleries": galleries, "runs": runs})
+        except RemoteError as exc:
+            _log(f"推送作品/批次失败 user={username}: {exc} (HTTP {exc.status})")
+            raise
+        pushed = res.get("pushed") or {}
+        _log(f"推送完成 user={username} 远端合并 作品={pushed.get('galleries', 0)} 批次={pushed.get('runs', 0)}")
+        return res
 
 
 # ============================================================
