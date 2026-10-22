@@ -46,7 +46,7 @@ AGENTS.md 是权威约束文件，本文件不重复其内容，只做入口指�
 | service | `app/services/` | 业务编排：cloud/remote/local 分支、上游拉取、下载落盘、收藏同步。八个模块：auth/sync/settings/cloud/works/download/favorites/assets |
 | dao | `app/dao/` | 数据存取：schema/clustering/galleries/runs/users/settings/jobs/cloud_merge。`app/db.py` 是纯 re-export 壳（保持 `db.X` 调用零改动） |
 | 传输/抓取 | `app/supabase_client.py` / `app/remote_client.py` / `app/scraper.py` / `app/detail.py` / `app/upstream.py` / `app/covers.py` | Supabase 管理 API 客户端（PAT）/ 远程 VPS 代理客户端（Bearer）/ HTTP 抓取（代理、重试、翻页）/ 详情 API / 需 Key 的上游接口 / 封面下载 |
-| 任务服务 | `app/scrape_service.py` / `app/download_queue.py` | 抓取任务（后台线程、进度、取消，锁必须 `RLock`）/ 服务端并发下载队列 |
+| 任务服务 | `app/scrape_service.py` / `app/download_queue.py` | 抓取队列（单 worker 串行、可无限入队、取消=停当前+清空队列，锁必须 `RLock`）/ 服务端并发下载队列 |
 
 其余：
 - `run.py` — 启动入口（参数解析 + `db.init_db()` + `ensure_user_dbs()` 起服务），无业务逻辑
@@ -74,7 +74,7 @@ AGENTS.md 是权威约束文件，本文件不重复其内容，只做入口指�
 
 ## 已知坑（真实踩过，别重犯）
 
-1. `ScrapeService` 的锁必须是 `RLock`（`start()` 持锁期间会调 `_log()`，普通 `Lock` 自我死锁）。
+1. `ScrapeService` 的锁必须是 `RLock`（worker/start 持锁期间会调 `_log()`/`_begin_task()`，普通 `Lock` 自我死锁）。
 2. `Fetcher.fetch_raw()` 不能删，`fetch_text()`/`fetch_bytes()` 都依赖它。
 3. 详情 API 的 `thumbnail` 是对象（`{"path": ..., ...}`），必须用 `_thumbnail_url()` 归一化，直接 `str()` 会破坏列表页的完整 URL 导致封面全失败。
 4. 原始标题与列表标题不能混用做指纹；精确分组用 `original_key`，模糊合并一律用列表标题指纹。
