@@ -173,6 +173,31 @@ def update_user_settings(username: str, *, api_key: str | None = None,
             conn.close()
 
 
+def upsert_user_credentials(username: str, *, password_hash: str, salt: str,
+                            api_key: str = "", site_origin: str = "",
+                            path: str | Path | None = None) -> None:
+    """覆写本地账号行的哈希/盐/Key/域名（登录云回退重建用户用）。
+
+    公开方法，供 service 层调用；行为等价于旧的「直接摸 _WRITE_LOCK 改
+    users 表」，但走正规 connect，不留层泄漏。
+    """
+    username = (username or "").strip()
+    if not username:
+        return
+    with _WRITE_LOCK:
+        conn = connect(path)
+        try:
+            conn.execute(
+                "UPDATE users SET password_hash = ?, salt = ?, api_key = ?, "
+                "site_origin = ? WHERE username = ?",
+                (password_hash, salt, str(api_key or ""),
+                 str(site_origin or ""), username),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
 def delete_session(token: str, path: str | Path | None = None) -> bool:
     token = (token or "").strip()
     if not token:

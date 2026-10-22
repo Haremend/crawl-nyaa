@@ -51,8 +51,8 @@ from .dao.runs import (  # noqa: F401
 # users：账号/会话/每用户独立库/跨库标记
 from .dao.users import (  # noqa: F401
     user_db_path, hash_password, register_user, verify_user, create_session,
-    get_user_by_session, get_user, update_user_settings, delete_session,
-    list_usernames, iter_user_db_paths, mark_downloaded_all,
+    get_user_by_session, get_user, update_user_settings, upsert_user_credentials,
+    delete_session, list_usernames, iter_user_db_paths, mark_downloaded_all,
 )
 
 # settings：实例级设置与站点地址推导
