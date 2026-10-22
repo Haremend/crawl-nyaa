@@ -126,9 +126,8 @@
 | `app/upstream.py` | 需要 Key 的上游接口（收藏、下载、账号） | §1.4 的 Key 规则在这里实现 |
 | `app/titles.py` | 标题指纹与「是否同一作品」判定 | 去重的核心算法 |
 | `app/db.py` | SQLite 存取层（入库、去重聚类、查询、迁移） | 体量最大，改动要跑全量测试 |
-| `app/service.py` | 抓取任务管理（后台线程、进度、取消） | 锁必须是 `RLock` |
+| `app/scrape_service.py` | 抓取任务管理（后台线程、进度、取消） | 锁必须是 `RLock` |
 | `app/covers.py` | 封面下载到 `cover/` | 文件名 = `<gallery_id>.<ext>` |
-| `app/downloader.py` | 批量下载服务（待下载 / 整批保存） | 支持服务器保存与清单写入 |
 | `app/server.py` | 内置 HTTP 服务（静态资源 + JSON API） | 路由、当前用户解析与 Key 读取都在这里 |
 | `app/supabase_client.py` | Supabase 管理 API 客户端与按用户同步 | 只从环境读取 token；表名/DDL/RLS 必须与线上迁移一致 |
 | `app/demo.py` | 演示数据（离线预览前端） | 只用 `samples/` 里的虚构样本 |

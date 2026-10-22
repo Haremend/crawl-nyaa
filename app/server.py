@@ -28,8 +28,8 @@ from . import controllers
 from .download_queue import DownloadQueue
 from .scraper import Fetcher
 from .upstream import UpstreamClient
-from . import service as service_module
-from .service import ScrapeError, ScrapeService
+from . import scrape_service as service_module
+from .scrape_service import ScrapeError, ScrapeService
 
 
 SESSION_COOKIE = "claw_session"

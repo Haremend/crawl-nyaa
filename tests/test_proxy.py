@@ -146,10 +146,10 @@ class ScrapeProxyTests(unittest.TestCase):
     def _run_fake_scrape(self):
         import time
 
-        from app import service as service_module
+        from app import scrape_service as service_module
         from app.parser import GalleryItem
         from app.scraper import PageResult
-        from app.service import ScrapeService
+        from app.scrape_service import ScrapeService
 
         seen = {}
 

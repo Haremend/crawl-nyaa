@@ -1,8 +1,8 @@
 """controller：抓取域（启动/取消/状态）。业务在 service.ScrapeService。"""
 from __future__ import annotations
 
-from app import service as service_module
-from app.service import ScrapeError
+from app import scrape_service as service_module
+from app.scrape_service import ScrapeError
 
 
 def post_scrape(h) -> None:

@@ -8,7 +8,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from app import db, server as server_module, service as service_module
+from app import db, server as server_module, scrape_service as service_module
 from app.server import ApiServer, Handler
 from app.parser import GalleryItem
 from app.scraper import PageResult

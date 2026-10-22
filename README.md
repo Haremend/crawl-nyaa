@@ -201,7 +201,7 @@ claw-gallery/
 │   ├── detail.py         # 详情 API 客户端（原始标题、标签、页数、收藏数）
 │   ├── scraper.py        # HTTP 抓取（代理、重试、限速、翻页生成器）
 │   ├── db.py             # SQLite 存取层（幂等入库、聚类去重、语言过滤、查询）
-│   ├── service.py        # 抓取任务管理（后台线程、进度、取消、逐页入库）
+│   ├── scrape_service.py # 抓取任务管理（后台线程、进度、取消、逐页入库）
 │   ├── server.py         # 内置 HTTP 服务（静态页面 + JSON API + 图片代理）
 │   └── demo.py           # 演示数据写入
 ├── web/                  # 前端（原生 HTML/CSS/JS，无构建步骤）

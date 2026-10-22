@@ -570,7 +570,7 @@ class CloudScrapeSinkTests(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_cloud_sink_writes_to_cloud_not_local(self):
-        from app import service as svc
+        from app import scrape_service as svc
         sink = svc.CloudSink(username="alice")
         result = sink.upsert_items(
             [GalleryItem(gallery_id=55001, url="https://example.net/g/55001/",
@@ -583,7 +583,7 @@ class CloudScrapeSinkTests(unittest.TestCase):
                             for s in self.fake.statements))
 
     def test_cloud_sink_existing_id_is_dup(self):
-        from app import service as svc
+        from app import scrape_service as svc
         self.fake.galleries["alice"] = [{
             "gallery_id": 55002, "title": "Exist", "last_seen": "2026-01-01T00:00:00+00:00",
         }]

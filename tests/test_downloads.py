@@ -1,4 +1,4 @@
-"""待下载 / 已下载 / 站点收藏 / 下载服务测试（全部离线）。"""
+"""待下载 / 已下载 / 站点收藏 / 下载队列测试（全部离线）。"""
 import shutil
 import time
 import unittest
@@ -6,7 +6,6 @@ import uuid
 from pathlib import Path
 
 from app import db
-from app.downloader import DownloadService
 from app.parser import GalleryItem
 from app.upstream import UpstreamClient, UpstreamError
 
@@ -151,42 +150,6 @@ class UpstreamClientTests(unittest.TestCase):
         client.get_download_url(5, "zip")
         self.assertEqual(seen["headers"].get("Authorization"), "Key secret-key")
         self.assertEqual(seen["method"], "POST")
-
-
-class DownloadServiceTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = make_temp_dir("dl")
-        self.db_path = self.tmp / "t.sqlite3"
-        db.init_db(self.db_path)
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def test_requires_api_key(self):
-        service = DownloadService(self.db_path)
-        with self.assertRaises(UpstreamError) as ctx:
-            service.start("", "zip")
-        self.assertEqual(ctx.exception.status, 401)
-
-    def test_requires_targets(self):
-        db.upsert_items(
-            [GalleryItem(gallery_id=1, url="https://example.net/g/1/", title="x",
-                         languages=["japanese"])],
-            source_url="https://example.net/group/x/", path=self.db_path,
-        )
-        service = DownloadService(self.db_path)
-        with self.assertRaises(UpstreamError) as ctx:
-            service.start("dummy-key", "zip")
-        self.assertEqual(ctx.exception.status, 400)
-        self.assertIn("待下载", str(ctx.exception))
-
-    def test_idle_snapshot(self):
-        service = DownloadService(self.db_path)
-        snapshot = service.snapshot()
-        self.assertFalse(snapshot["running"])
-        self.assertEqual(snapshot["status"], "idle")
-
-
 
 
 class DownloadQueueSelfHealTests(unittest.TestCase):

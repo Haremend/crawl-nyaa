@@ -5,10 +5,10 @@ import unittest
 import uuid
 from pathlib import Path
 
-from app import config, db, service as service_module
+from app import config, db, scrape_service as service_module
 from app.parser import GalleryItem
 from app.scraper import PageResult
-from app.service import ScrapeError, ScrapeService, normalize_listing_url
+from app.scrape_service import ScrapeError, ScrapeService, normalize_listing_url
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TMP_ROOT = PROJECT_ROOT / ".test-tmp"

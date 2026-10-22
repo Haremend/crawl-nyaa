@@ -126,44 +126,5 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(db.list_batch_targets(999, self.db_path), [])
 
 
-class BatchSaveTests(unittest.TestCase):
-    """「保存全部」：批次模式下载服务的参数校验。"""
-
-    def setUp(self):
-        self.tmp = make_temp_dir("saveall")
-        self.db_path = self.tmp / "t.sqlite3"
-        db.init_db(self.db_path)
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def test_requires_api_key(self):
-        from app.downloader import DownloadService
-        from app.upstream import UpstreamError
-        service = DownloadService(self.db_path)
-        with self.assertRaises(UpstreamError) as ctx:
-            service.start("", "zip", mode="batch", batch_id=1)
-        self.assertEqual(ctx.exception.status, 401)
-
-    def test_requires_batch_id(self):
-        from app.downloader import DownloadService
-        from app.upstream import UpstreamError
-        db.create_run("https://example.net/group/a/", self.db_path)
-        service = DownloadService(self.db_path)
-        with self.assertRaises(UpstreamError) as ctx:
-            service.start("dummy", "zip", mode="batch", batch_id=0)
-        self.assertIn("批次", str(ctx.exception))
-
-    def test_empty_batch_rejected(self):
-        from app.downloader import DownloadService
-        from app.upstream import UpstreamError
-        run_id = db.create_run("https://example.net/group/a/", self.db_path)
-        service = DownloadService(self.db_path)
-        with self.assertRaises(UpstreamError) as ctx:
-            service.start("dummy", "zip", mode="batch", batch_id=run_id)
-        self.assertIn("没有可保存", str(ctx.exception))
-
-
-
 if __name__ == "__main__":
     unittest.main()

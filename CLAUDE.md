@@ -46,7 +46,7 @@ AGENTS.md 是权威约束文件，本文件不重复其内容，只做入口指�
 | service | `app/services/` | 业务编排：cloud/remote/local 分支、上游拉取、下载落盘、收藏同步。八个模块：auth/sync/settings/cloud/works/download/favorites/assets |
 | dao | `app/dao/` | 数据存取：schema/clustering/galleries/runs/users/settings/jobs/cloud_merge。`app/db.py` 是纯 re-export 壳（保持 `db.X` 调用零改动） |
 | 传输/抓取 | `app/supabase_client.py` / `app/remote_client.py` / `app/scraper.py` / `app/detail.py` / `app/upstream.py` / `app/covers.py` | Supabase 管理 API 客户端（PAT）/ 远程 VPS 代理客户端（Bearer）/ HTTP 抓取（代理、重试、翻页）/ 详情 API / 需 Key 的上游接口 / 封面下载 |
-| 任务服务 | `app/service.py` / `app/download_queue.py` | 抓取任务（后台线程、进度、取消，锁必须 `RLock`）/ 服务端并发下载队列 |
+| 任务服务 | `app/scrape_service.py` / `app/download_queue.py` | 抓取任务（后台线程、进度、取消，锁必须 `RLock`）/ 服务端并发下载队列 |
 
 其余：
 - `run.py` — 启动入口（参数解析 + `db.init_db()` + 起服务），无业务逻辑

@@ -83,10 +83,10 @@ class ScrapeDetailCoverPathTests(unittest.TestCase):
 
     def test_scrape_with_enrich_and_covers_does_not_raise(self):
         from app import covers as covers_module
-        from app import service as service_module
+        from app import scrape_service as service_module
         from app.parser import GalleryItem
         from app.scraper import PageResult
-        from app.service import ScrapeService
+        from app.scrape_service import ScrapeService
 
         original_iter = service_module.iter_pages
         original_fetch_detail = service_module.fetch_detail

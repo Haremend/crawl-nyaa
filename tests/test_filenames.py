@@ -198,12 +198,6 @@ class RedownloadModeTests(unittest.TestCase):
         self.assertEqual(db.list_batch_targets(run_id, self.db_path), [])
         self.assertEqual(len(db.list_batch_targets(run_id, self.db_path, skip_downloaded=False)), 1)
 
-    def test_service_accepts_redownload_flag(self):
-        import inspect
-        from app.downloader import DownloadService
-        params = inspect.signature(DownloadService.start).parameters
-        self.assertIn("redownload", params, "下载服务应支持 redownload 参数")
-
 
 if __name__ == "__main__":
     unittest.main()
