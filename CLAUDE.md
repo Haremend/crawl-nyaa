@@ -38,23 +38,26 @@ AGENTS.md 是权威约束文件，本文件不重复其内容，只做入口指�
 
 ## 架构地图
 
-| 文件 | 职责 |
-| --- | --- |
-| `run.py` | 启动入口（参数解析 + `db.init_db()` + 起服务），无业务逻辑 |
-| `app/config.py` | 全部 `CLAW_*` 配置；先加载 `.env`（不覆盖已存在环境变量） |
-| `app/parser.py` | 列表页 HTML 解析（`HTMLParser` + 正则降级）；语言来自卡片 `lang-xx` class |
-| `app/scraper.py` | HTTP 抓取（代理、重试、限速、翻页生成器）；`Fetcher`/`fetch_raw` 全项目复用 |
-| `app/detail.py` | 详情 API 客户端（公开接口，不带 Key） |
-| `app/upstream.py` | 需要 Key 的上游接口（收藏、下载、账号），auth 规则在此实现 |
-| `app/titles.py` | 标题指纹与「是否同一作品」判定，去重核心算法 |
-| `app/db.py` | SQLite 存取层（体量最大，~1840 行，改动跑全量测试） |
-| `app/service.py` | 抓取任务管理（后台线程、进度、取消），锁必须是 `RLock` |
-| `app/covers.py` | 封面下载到 `cover/`，文件名 `<gallery_id>.<ext>` |
-| `app/downloader.py` / `app/download_queue.py` | 批量下载服务 + 服务端下载队列（任务存 `download_jobs` 表，N 个 worker 并发） |
-| `app/server.py` | 内置 `ThreadingHTTPServer`，静态资源 + 全部 JSON API 路由 |
-| `app/supabase_client.py` | 可选云端副本（多用户开发中） |
-| `app/demo.py` | 离线演示数据写入，只用 `samples/` |
-| `web/` | 原生单页前端（`index.html`/`app.js`/`style.css`），由后端托管 |
+项目按 java-web 三层组织，「需要时快速定位功能在哪」：
+
+| 层 | 目录 | 职责 |
+| --- | --- | --- |
+| controller | `app/controllers/` | 读请求参数 → 调 service → 格式化响应。`routes.py` 是 `(方法,路径)→controller` 路由表 + `dispatch`，`do_GET`/`do_POST` 查表分派。按域拆：auth/settings/works/sync/scrape/download/favorites/assets |
+| service | `app/services/` | 业务编排：cloud/remote/local 分支、上游拉取、下载落盘、收藏同步。八个模块：auth/sync/settings/cloud/works/download/favorites/assets |
+| dao | `app/dao/` | 数据存取：schema/clustering/galleries/runs/users/settings/jobs/cloud_merge。`app/db.py` 是纯 re-export 壳（保持 `db.X` 调用零改动） |
+| 传输/抓取 | `app/supabase_client.py` / `app/remote_client.py` / `app/scraper.py` / `app/detail.py` / `app/upstream.py` / `app/covers.py` | Supabase 管理 API 客户端（PAT）/ 远程 VPS 代理客户端（Bearer）/ HTTP 抓取（代理、重试、翻页）/ 详情 API / 需 Key 的上游接口 / 封面下载 |
+| 任务服务 | `app/service.py` / `app/download_queue.py` | 抓取任务（后台线程、进度、取消，锁必须 `RLock`）/ 服务端并发下载队列 |
+
+其余：
+- `run.py` — 启动入口（参数解析 + `db.init_db()` + 起服务），无业务逻辑
+- `app/config.py` — 全部 `CLAW_*` 配置；先加载 `.env`（不覆盖已存在环境变量）
+- `app/server.py` — 内置 `ThreadingHTTPServer` + `Handler`（基础设施：guard、响应工具、静态/封面文件服务、路由分派），~540 行，业务已全下沉到三层
+- `app/parser.py` — 列表页 HTML 解析（`HTMLParser` + 正则降级）；语言来自卡片 `lang-xx` class
+- `app/titles.py` — 标题指纹与「是否同一作品」判定，去重核心算法
+- `app/filenames.py` — 下载文件名净化 `{id}_{名称}.{ext}`
+- `web/` — 原生单页前端（`index.html`/`app.js`/`style.css`），由后端托管
+
+**定位某个功能**：先看 `app/controllers/routes.py` 路由表找到端点 → 对应 controller 文件（解析/格式化）→ 它调的 `app/services/*`（业务）→ 里面的 `app/dao/*` 或 `supabase_client`/`remote_client`（数据）。
 
 ## 数据模型要点
 
