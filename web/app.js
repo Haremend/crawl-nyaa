@@ -534,7 +534,7 @@ async function loadMeta() {
   state.batches = meta.batches || [];
   renderBatchOptions();
   renderSetupHint(meta);
-  if (meta.scrape && meta.scrape.running) startPolling();
+  if (meta.scrape && (meta.scrape.running || (meta.scrape.queue_length || 0) > 0)) startPolling();
   else if (meta.scrape && ["done", "cancelled", "error"].includes(meta.scrape.status)) renderProgress(meta.scrape);
 }
 
@@ -1099,13 +1099,12 @@ async function localLoop(mode, batchId) {
 async function startScrape() {
   const url = $("urlInput").value.trim();
   if (!url) { toast("请先填写列表页 URL", "error"); return; }
-  state.finishedRunId = null;
-  $("startBtn").disabled = true;
+  // 队列模式：开始抓取按钮永远不置灰，可一直往队列里加 URL。
   $("progressPanel").hidden = false;
   const limits = (state.meta && state.meta.limits) || {};
   const fallbackDelay = Number.isFinite(limits.default_delay) ? limits.default_delay : 1.2;
   try {
-    await api("/api/scrape", {
+    const scrape = await api("/api/scrape", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1117,10 +1116,18 @@ async function startScrape() {
         incremental: $("incrementalCheck").checked,
       }),
     });
-    toast("已开始抓取");
+    // 后端永不返回 409：若该 URL 立即开跑（running 且当前 url==提交的）则「已开始」，
+    // 否则排在队列后面。
+    if (scrape && scrape.running && scrape.url === url) {
+      toast("已开始抓取");
+    } else {
+      toast("已加入队列，前面还有 " + ((scrape && scrape.queue_length) || 0) + " 个");
+    }
+    // 清空输入框，方便继续粘下一条 URL 入队
+    $("urlInput").value = "";
     startPolling();
   } catch (error) {
-    $("startBtn").disabled = false;
+    // 400（URL 格式非法）等：toast 报错，但开始按钮保持可点
     toast(error.message, "error");
   }
 }
@@ -1131,10 +1138,10 @@ function stopPolling() { if (state.scrapePolling) { window.clearInterval(state.s
 async function pollStatus() {
   let status;
   try { status = await api("/api/scrape/status", { silent: true }); }
-  catch (error) { stopPolling(); $("startBtn").disabled = false; return; }
+  catch (error) { stopPolling(); return; }
   renderProgress(status);
-  $("startBtn").disabled = Boolean(status.running);
-  $("cancelBtn").disabled = !status.running;
+  // 队列模式：开始按钮永不置灰；取消按钮在有任务（正在跑 or 队列非空）时可点
+  $("cancelBtn").disabled = !(status.running || (status.queue_length > 0));
   if (!status.running && ["done", "cancelled", "error"].includes(status.status) && state.finishedRunId !== status.run_id) {
     state.finishedRunId = status.run_id;
     if (status.status === "done") {
@@ -1146,7 +1153,8 @@ async function pollStatus() {
       toast(status.error || "抓取失败", "error");
       loadMeta().catch(() => {});
     }
-    stopPolling();
+    // 队列里还有任务则继续轮询（下一个会接着跑）；只有队列彻底空了才停轮询
+    if ((status.queue_length || 0) === 0) stopPolling();
   }
 }
 
@@ -1164,10 +1172,41 @@ function renderProgress(status) {
     ? " · 详情 " + (status.details_done || 0) + "/" + (status.details_total || 0) : "";
   const coverText = (status.covers_done || status.covers_failed)
     ? " · 封面 " + (status.covers_done || 0) + " 张" : "";
+  const queueTag = (status.queue_length || 0) > 0 ? " · 队列剩余 " + status.queue_length : "";
   $("progressText").innerHTML = "状态：<b>" + esc(map[status.status] || status.status) + "</b> · 页 " + done + "/" + (total || "?")
     + " · 发现 " + (status.items_seen || 0) + " · 新增 " + (status.items_new || 0) + " · 重复 " + (status.items_dup || 0)
-    + detail + coverText + (status.error ? " · " + esc(status.error) : "");
+    + detail + coverText + queueTag + (status.error ? " · " + esc(status.error) : "");
   $("logBox").textContent = (status.logs || []).slice(-12).join("\n");
+  renderScrapeQueue(status);
+}
+
+/* 渲染待抓取队列：正在抓取的那条置顶高亮，其余按入队顺序列出。 */
+function renderScrapeQueue(status) {
+  const panel = $("scrapeQueuePanel");
+  const list = $("scrapeQueueList");
+  const count = $("scrapeQueueCount");
+  if (!panel || !list || !count) return;
+  const running = Boolean(status.running);
+  const queue = Array.isArray(status.queue) ? status.queue : [];
+  const hasAnything = running || queue.length > 0;
+  panel.hidden = !hasAnything;
+  count.textContent = String(queue.length);
+  if (!hasAnything) { list.innerHTML = ""; return; }
+  const parts = [];
+  if (running && status.url) {
+    parts.push('<li class="scrape-queue-item running">'
+      + '<span class="sq-idx">▶</span>'
+      + '<span class="sq-url" title="' + esc(status.url) + '">' + esc(status.url) + '</span>'
+      + '<span class="sq-state">正在抓取</span></li>');
+  }
+  queue.forEach((task, i) => {
+    const u = esc(task && task.url || "");
+    parts.push('<li class="scrape-queue-item">'
+      + '<span class="sq-idx">' + (i + 1) + '</span>'
+      + '<span class="sq-url" title="' + u + '">' + u + '</span>'
+      + '<span class="sq-state">等待中</span></li>');
+  });
+  list.innerHTML = parts.join("");
 }
 
 /* ==================================================================
@@ -1256,7 +1295,7 @@ function bindEvents() {
   $("startBtn").addEventListener("click", startScrape);
   $("urlInput").addEventListener("keydown", (event) => { if (event.key === "Enter") startScrape(); });
   $("cancelBtn").addEventListener("click", async () => {
-    try { await api("/api/scrape/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); toast("已发送取消请求"); }
+    try { await api("/api/scrape/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); toast("已发送取消请求，停止当前任务并清空队列"); }
     catch (error) { toast(error.message, "error"); }
   });
 

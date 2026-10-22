@@ -23,17 +23,17 @@ def post_scrape(h) -> None:
             incremental=payload.get("incremental"),
         )
     except ScrapeError as exc:
-        busy = "正在进行" in str(exc)
-        h._error(str(exc), 409 if busy else 400)
+        # start() 只在 URL/参数非法时抛错（→400）；队列化后不再因「忙」拒绝。
+        h._error(str(exc), 400)
         return
     h._json({"ok": True, "scrape": state})
 
 
 def post_scrape_cancel(h) -> None:
     user = h._current_user()
-    cancelled = h._scrape_service(user).cancel()
-    h._json({"ok": True, "cancelled": cancelled,
-             **h._scrape_service(user).snapshot()})
+    service = h._scrape_service(user)
+    cancelled = service.cancel()
+    h._json({"ok": True, "cancelled": cancelled, **service.snapshot()})
 
 
 def get_scrape_status(h) -> None:

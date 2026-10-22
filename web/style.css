@@ -111,6 +111,31 @@ input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px r
 @keyframes slide { from { margin-left: 0; } to { margin-left: 65%; } }
 .progress-text { margin-top: 9px; color: var(--muted); font-size: 14px; }
 .progress-text b { color: var(--text); }
+
+/* ---------- 抓取队列 ---------- */
+.scrape-queue-panel { margin-top: 14px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.scrape-queue-head {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 9px 14px; background: var(--panel-2); border-bottom: 1px solid var(--border);
+}
+.scrape-queue-title { font-weight: 700; font-size: 14px; }
+.scrape-queue-hint { color: var(--muted); font-size: 12.5px; }
+.scrape-queue-list { list-style: none; margin: 0; padding: 0; }
+.scrape-queue-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 14px; border-bottom: 1px solid #eef0f3; font-size: 14px;
+}
+.scrape-queue-item:last-child { border-bottom: none; }
+.scrape-queue-item .sq-idx { color: var(--muted); font-size: 13px; width: 1.6em; flex: none; text-align: center; }
+.scrape-queue-item .sq-url {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: Consolas, "Cascadia Mono", monospace; font-size: 13px; color: var(--text);
+}
+.scrape-queue-item .sq-state { color: var(--muted); font-size: 12.5px; flex: none; }
+.scrape-queue-item.running {
+  background: #f3f8ff; border-left: 3px solid var(--accent);
+}
+.scrape-queue-item.running .sq-state { color: var(--accent); font-weight: 600; }
 .log {
   margin: 11px 0 0; padding: 11px 14px; max-height: 190px; overflow: auto;
   background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;

@@ -112,6 +112,14 @@
     <p class="hint">公开接口（详情、标签）不带 Key；只有收藏列表与下载才使用 Key。</p>
     <p class="hint setup-hint" id="setupHint" hidden></p>
 
+    <div class="scrape-queue-panel" id="scrapeQueuePanel" hidden>
+      <div class="scrape-queue-head">
+        <span class="scrape-queue-title">待抓取队列（<span id="scrapeQueueCount">0</span>）</span>
+        <span class="scrape-queue-hint">可继续粘贴 URL 加入队列，按顺序逐个抓取</span>
+      </div>
+      <ul class="scrape-queue-list" id="scrapeQueueList"></ul>
+    </div>
+
     <div class="progress" id="progressPanel" hidden>
       <div class="progress-track"><div class="progress-bar" id="progressBar"></div></div>
       <div class="progress-text" id="progressText"></div>

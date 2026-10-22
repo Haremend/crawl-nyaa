@@ -399,16 +399,21 @@ def _as_list(value) -> list:
 
 
 class ScrapeService:
-    """单任务抓取服务（同一时间只允许一个抓取任务）。"""
+    """抓取队列服务：可无限入队 URL，单 worker 线程按序逐个抓取。
+
+    抓取流程（翻页 / 增量 / 详情 / 封面 / 批次合并）完全不变，只是把
+    「同一时间只允许一个任务」改成「一个任务在跑、其余排队，跑完自动接下一个」。
+    """
 
     def __init__(self, db_path: str | Path | None = None, sink: ScrapeSink | None = None) -> None:
         self.db_path = db_path
         self.sink: ScrapeSink = sink or SQLiteSink(db_path)
-        # 必须是 RLock：start() 持锁期间会调用 _log()/_progress()，
-        # 普通 Lock 会自我死锁，导致任务永远不会启动。
+        # 必须是 RLock：worker 持锁期间会调用 _log()/_progress()/_begin_task()，
+        # 普通 Lock 会自我死锁。
         self._lock = threading.RLock()
-        self._cancel = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._cancel = threading.Event()       # 取消「当前正在跑」的任务
+        self._thread: threading.Thread | None = None   # 单 worker，串行处理队列
+        self._queue: deque[dict] = deque()     # 待抓取任务（不含正在跑的）
         self._logs: deque[str] = deque(maxlen=200)
         self._state: dict[str, Any] = self._idle_state()
         # 本地模式才需要本地库；云模式 sink 不依赖 SQLite
@@ -426,9 +431,15 @@ class ScrapeService:
     def start(self, url: str, max_pages: int | str | None = 0,
               delay: float | str | None = None, enrich: bool | None = None,
               covers: bool | None = None, incremental: bool | None = None) -> dict:
+        """把一个 URL 加入抓取队列；若当前空闲则立即开始，否则排队等候。
+
+        URL 非法时抛 ScrapeError（controller → 400）；永远不会因「忙」而拒绝——
+        忙就排队。返回当前 snapshot（含 queue）。立即开跑的任务由本方法同步
+        _begin_task（snapshot 即时反映其 url/run_id），并作为 worker 线程的首参，
+        不进 _queue（故 queue_length 不把它算进去）；排队任务才入 _queue。
+        """
         with self._lock:
-            if self._thread is not None and self._thread.is_alive():
-                raise ScrapeError("已有抓取任务正在进行，请等待完成或点击取消")
+            # 校验在入队时同步完成，让调用方立刻拿到 400 而不是后台才失败
             clean_url = normalize_listing_url(url)
             try:
                 pages = int(max_pages or 0)
@@ -440,82 +451,130 @@ class ScrapeService:
             except (TypeError, ValueError):
                 delay_value = config.PAGE_DELAY
             delay_value = config.clamp_page_delay(delay_value)
-            enrich_enabled = self._bool_option(enrich, config.ENRICH_DEFAULT)
-            covers_on = self._bool_option(covers, config.COVER_DEFAULT)
-            incremental_on = self._bool_option(incremental, config.INCREMENTAL)
-
-            site_domain = urlsplit(clean_url).hostname or ""
-            # 抓取时把站点地址同步进设置（本地写 settings，云写 claw_users）
-            if site_domain:
-                self.sink.set_site_origin(f"{urlsplit(clean_url).scheme}://{site_domain}")
-            run_id = self.sink.create_run(clean_url)
-            self._cancel = threading.Event()
-            self._logs.clear()
-            self._state = {
-                "status": "running",
-                "running": True,
+            task = {
                 "url": clean_url,
-                "run_id": run_id,
-                "started_at": _now(),
-                "finished_at": None,
-                "pages_total": 0,
-                "pages_done": 0,
-                "items_seen": 0,
-                "items_new": 0,
-                "items_dup": 0,
-                "details_total": 0,
-                "details_done": 0,
-                "details_failed": 0,
-                "covers_done": 0,
-                "covers_failed": 0,
-                "enrich": enrich_enabled,
-                "covers": covers_on,
-                "incremental": incremental_on,
-                "error": None,
                 "max_pages": pages,
                 "delay": delay_value,
+                "enrich": self._bool_option(enrich, config.ENRICH_DEFAULT),
+                "covers": self._bool_option(covers, config.COVER_DEFAULT),
+                "incremental": self._bool_option(incremental, config.INCREMENTAL),
             }
-            effective = config.effective_proxy()
-            proxy_note = f"代理 {effective}" if effective else "直连（未使用代理）"
-            self._log(f"开始抓取：{clean_url}（{proxy_note}）")
-            if enrich_enabled:
-                self._log("已开启详情补全：调用 /api/v2/galleries/{id} 获取原始标题（精确去重）与完整标签")
+            idle = self._thread is None or not self._thread.is_alive()
+            if idle:
+                # 立即开跑：同步建批次 + 写状态，让 snapshot 即时正确
+                run_id, site_domain = self._begin_task(task)
+                task["_run_id"] = run_id
+                task["_site_domain"] = site_domain
+                self._thread = threading.Thread(
+                    target=self._worker, args=(task,), name="gallery-scrape",
+                    daemon=True)
+                self._thread.start()
             else:
-                self._log("未开启详情补全：仅使用列表页数据，去重依赖标题指纹")
-            if covers_on:
-                self._log(f"已开启封面下载：保存到 {config.COVER_DIR}")
-            if incremental_on:
-                latest = self.sink.latest_run_for_url(clean_url)
-                if latest:
-                    self._log(f"增量抓取：发现该地址上次成功批次 #{latest['run_id']}，遇到已收录条目即停止")
-                else:
-                    self._log("增量抓取：首次抓取该地址，将完整抓取")
-            else:
-                self._log("增量抓取已关闭：将完整抓取整个列表")
-            self._thread = threading.Thread(
-                target=self._run, args=(run_id, clean_url, pages, delay_value, enrich_enabled, covers_on, site_domain, incremental_on),
-                name="gallery-scrape", daemon=True,
-            )
-            self._thread.start()
+                # 正在抓：排队，worker 跑完当前会从 _queue 取下一个
+                self._queue.append(task)
             return self.snapshot()
 
+    def _begin_task(self, task: dict) -> tuple[int, str]:
+        """取一个排队任务，做建批次/写站点/重置状态等开跑前准备（调用方持锁）。
+
+        返回 (run_id, site_domain)。抓取循环 _run() 本身不持锁。
+        """
+        clean_url = task["url"]
+        site_domain = urlsplit(clean_url).hostname or ""
+        # 抓取时把站点地址同步进设置（本地写 settings，云写 claw_users）
+        if site_domain:
+            self.sink.set_site_origin(f"{urlsplit(clean_url).scheme}://{site_domain}")
+        run_id = self.sink.create_run(clean_url)
+        self._cancel = threading.Event()
+        self._logs.clear()
+        self._state = {
+            "status": "running",
+            "running": True,
+            "url": clean_url,
+            "run_id": run_id,
+            "started_at": _now(),
+            "finished_at": None,
+            "pages_total": 0,
+            "pages_done": 0,
+            "items_seen": 0,
+            "items_new": 0,
+            "items_dup": 0,
+            "details_total": 0,
+            "details_done": 0,
+            "details_failed": 0,
+            "covers_done": 0,
+            "covers_failed": 0,
+            "enrich": task["enrich"],
+            "covers": task["covers"],
+            "incremental": task["incremental"],
+            "error": None,
+            "max_pages": task["max_pages"],
+            "delay": task["delay"],
+        }
+        effective = config.effective_proxy()
+        proxy_note = f"代理 {effective}" if effective else "直连（未使用代理）"
+        self._log(f"开始抓取：{clean_url}（{proxy_note}）")
+        if task["enrich"]:
+            self._log("已开启详情补全：调用 /api/v2/galleries/{id} 获取原始标题（精确去重）与完整标签")
+        else:
+            self._log("未开启详情补全：仅使用列表页数据，去重依赖标题指纹")
+        if task["covers"]:
+            self._log(f"已开启封面下载：保存到 {config.COVER_DIR}")
+        if task["incremental"]:
+            latest = self.sink.latest_run_for_url(clean_url)
+            if latest:
+                self._log(f"增量抓取：发现该地址上次成功批次 #{latest['run_id']}，遇到已收录条目即停止")
+            else:
+                self._log("增量抓取：首次抓取该地址，将完整抓取")
+        else:
+            self._log("增量抓取已关闭：将完整抓取整个列表")
+        return run_id, site_domain
+
+    def _worker(self, first_task: dict) -> None:
+        """单 worker：先跑 start() 同步 begun 的首任务，再循环取 _queue 下一个。
+
+        退出时不动 _state（保留最后一个任务的最终状态，便于前端展示完成态）；
+        下一个任务入队时 start() 会重启 worker，_begin_task 会重置 _state。
+        串行化防丢失唤醒：start() 在 _lock 内检查 worker 存活 + append，与本处
+        「队列空就退出」由同一把 _lock 串行，不会丢任务。
+        """
+        # 首任务已由 start() 同步 _begin_task，这里直接跑
+        self._run(first_task["_run_id"], first_task["url"], first_task["max_pages"],
+                  first_task["delay"], first_task["enrich"], first_task["covers"],
+                  first_task["_site_domain"], first_task["incremental"])
+        while True:
+            with self._lock:
+                if not self._queue:
+                    return  # 队列空：退出，_state 保留上次最终状态
+                task = self._queue.popleft()
+                run_id, site_domain = self._begin_task(task)
+            # 抓取循环本身不持锁，snapshot/cancel 可并发读
+            self._run(run_id, task["url"], task["max_pages"], task["delay"],
+                      task["enrich"], task["covers"], site_domain, task["incremental"])
+
     def cancel(self) -> bool:
+        """取消当前正在抓取的任务 + 清空整个待抓取队列（停止一切）。"""
         with self._lock:
             alive = self._thread is not None and self._thread.is_alive()
+            had_queued = len(self._queue) > 0
+            self._queue.clear()
         if alive:
             self._cancel.set()
-            self._log("收到取消请求，正在停止…")
-        return alive
+            self._log("收到取消请求，停止当前任务并清空待抓取队列…")
+        return alive or had_queued
 
     def snapshot(self) -> dict:
         with self._lock:
             state = dict(self._state)
             logs = list(self._logs)
             alive = self._thread is not None and self._thread.is_alive()
+            queue = [dict(t) for t in self._queue]
         state["logs"] = logs
         state["running"] = bool(alive)
         if alive:
             state["status"] = "running"
+        state["queue"] = queue
+        state["queue_length"] = len(queue)
         return state
 
     # ---------- 内部实现 ----------
