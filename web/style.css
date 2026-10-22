@@ -41,9 +41,7 @@ main { max-width: 1560px; margin: 0 auto; padding: 22px 24px 70px; }
   box-shadow: 0 1px 4px rgba(20, 22, 26, 0.06);
 }
 .brand { display: flex; align-items: center; gap: 14px; }
-.logo { font-size: 34px; }
 .brand h1 { margin: 0; font-size: 24px; letter-spacing: 0.3px; }
-.brand .subtitle { margin: 3px 0 0; color: var(--muted); font-size: 14px; }
 .meta-chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .meta-btn { cursor: pointer; font-family: inherit; }
 .meta-btn:hover { border-color: var(--accent); color: var(--accent); }
