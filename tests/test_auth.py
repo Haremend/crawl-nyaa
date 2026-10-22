@@ -68,6 +68,17 @@ def session_cookie(set_cookie_header: str) -> str:
     return ""
 
 
+def setUpModule():
+    """模块级隔离：强制本地模式 + 未配置远程/Supabase。
+
+    dev 机的 .env 可能填了 CLAW_REMOTE_BASE / CLAW_SUPABASE_*（真实部署配置），
+    若不重置，config 在 import 时就会读到非空值，让本模块所有 sync/auth 测试
+    以为「已配置云端」而失败。每个测试类自己的 setUp 仍做快照+恢复；这里只在
+    模块入口兜底清一次，保证起点干净。"""
+    from tests._isolated import _force_local
+    _force_local()
+
+
 class FakeTransport:
     """内存版云端传输层：记录所有 SQL，按用户返回预置的拉取行。"""
 

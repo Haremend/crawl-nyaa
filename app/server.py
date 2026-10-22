@@ -16,6 +16,7 @@ import json
 import mimetypes
 import os
 import secrets
+import socket
 import sys
 import threading
 import webbrowser
@@ -26,6 +27,17 @@ from urllib.parse import parse_qs, quote, urlsplit
 from . import config, covers as covers_mod, db
 from . import supabase_client
 from . import remote_client
+
+# 云端请求日志：统一打到 stderr（不进 JSON 响应、不进前端）。只记脱敏字段
+# （username / 方向 / 行数 / HTTP 状态），**绝不**打账号 dict 或请求体——里面
+# 带 API Key（违反 AGENTS.md §1.2：Key 不得写日志）。
+import datetime as _datetime
+import sys as _sys
+
+
+def _cloud_log(*parts) -> None:
+    ts = _datetime.datetime.now(_datetime.timezone.utc).isoformat(timespec="seconds")
+    print(f"[{ts}] [cloud] " + " ".join(str(p) for p in parts), file=_sys.stderr)
 from .download_queue import DownloadQueue
 from .filenames import download_filename
 from .scraper import FetchError, Fetcher
@@ -141,7 +153,25 @@ def _parse_cookies(header: str | None) -> dict[str, str]:
 
 class ApiServer(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    # Windows 上 SO_REUSEADDR（基类 HTTPServer 默认设的）语义比 Linux 宽松：允许
+    # 多个进程同时绑同一端口，谁抢到连接谁应答 —— 会导致旧的 python run.py 实例
+    # 叠在新实例下面、持续应答旧代码（登录 bug 排查时踩到，4 个旧进程同绑 8787）。
+    # Windows 改用 SO_EXCLUSIVEADDRUSE：禁止别的进程再来绑同端口，本进程仍能
+    # 绑过 TIME_WAIT 快速重启。Linux 的 SO_REUSEADDR 不允许多进程同绑（需
+    # SO_REUSEPORT 且两侧都设），保持默认 True 即可。
+    allow_reuse_address = (os.name != "nt")
+
+    def server_bind(self):
+        # Windows：先设 SO_EXCLUSIVEADDRUSE（必须在 bind 前），再交给基类绑。
+        # allow_reuse_address 在 Windows 为 False，基类不会再设 SO_REUSEADDR。
+        if os.name == "nt":
+            opt = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+            if opt is not None:
+                try:
+                    self.socket.setsockopt(socket.SOL_SOCKET, opt, 1)
+                except OSError:
+                    pass
+        return super().server_bind()
 
     def __init__(self, address, handler_cls, *, db_path=None, web_dir=None):
         super().__init__(address, handler_cls)
@@ -1194,22 +1224,26 @@ class Handler(BaseHTTPRequestHandler):
         # 这是 C 端免带 Supabase 凭据的方案（VPS 持有 PAT 作为账号权威）。
         if config.remote_configured():
             try:
+                _cloud_log(f"注册→VPS upsert 账号 user={username}")
                 remote_client.get_client().upsert_account(
                     username, api_key=api_key, site_origin=site_origin,
                     password_hash=digest, salt=salt, created_at=db.utc_now())
                 cloud_used = True
             except remote_client.RemoteError as exc:
+                _cloud_log(f"注册→VPS 失败 user={username}: {exc} (HTTP {exc.status})")
                 self._error(f"注册失败：无法写入远程 VPS：{exc}", 400)
                 return
         # 未配远程、但配了 Supabase：维持现状直连云端（best-effort，失败回退纯本地）
         elif supabase_client.configured():
             try:
+                _cloud_log(f"注册→Supabase 直写凭据 user={username}")
                 supabase_client.ensure_tables()
                 supabase_client.push_user_credentials(
                     username, api_key=api_key, site_origin=site_origin,
                     password_hash=digest, salt=salt, created_at=db.utc_now())
                 cloud_used = True
             except (supabase_client.SupabaseError, ValueError) as exc:
+                _cloud_log(f"注册→Supabase 失败 user={username}: {exc}")
                 cloud_error = str(exc)
         try:
             created = db.register_user(username, password, api_key=api_key,
@@ -1258,13 +1292,17 @@ class Handler(BaseHTTPRequestHandler):
         """
         if config.remote_configured():
             try:
+                _cloud_log(f"登录云回退→VPS 读账号 user={username}")
                 account = remote_client.get_client().fetch_account(username)
-            except remote_client.RemoteError:
+            except remote_client.RemoteError as exc:
+                _cloud_log(f"登录云回退→VPS 读账号失败 user={username}: {exc} (HTTP {exc.status})")
                 return False
         else:
             try:
+                _cloud_log(f"登录云回退→Supabase 读账号 user={username}")
                 account = supabase_client.fetch_account(username)
-            except supabase_client.SupabaseError:
+            except supabase_client.SupabaseError as exc:
+                _cloud_log(f"登录云回退→Supabase 读账号失败 user={username}: {exc}")
                 return False
         if not account:
             return False
@@ -1558,8 +1596,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._error("本部署未配置 Supabase，无法作为远程账号权威", 400)
                 return
             try:
+                _cloud_log(f"VPS←C 端 读账号 user={username}")
                 account = supabase_client.fetch_account(username)
+                _cloud_log(f"VPS←C 端 读账号完成 user={username} 命中={'是' if account else '否'}")
             except supabase_client.SupabaseError as exc:
+                _cloud_log(f"VPS←C 端 读账号失败 user={username}: {exc}")
                 self._error(str(exc), exc.status or 502)
                 return
             self._json({"ok": True, "account": account})
@@ -1576,6 +1617,8 @@ class Handler(BaseHTTPRequestHandler):
             self._error("本部署未配置 Supabase，无法作为远程账号权威", 400)
             return
         try:
+            _cloud_log(f"VPS←C 端 upsert 账号 user={username} "
+                       f"api_key=({'有' if str(payload.get('api_key') or '') else '无'})")
             supabase_client.push_user_credentials(
                 username,
                 api_key=str(payload.get("api_key") or ""),
@@ -1584,7 +1627,9 @@ class Handler(BaseHTTPRequestHandler):
                 salt=str(payload.get("salt") or ""),
                 created_at=str(payload.get("created_at") or ""),
             )
+            _cloud_log(f"VPS←C 端 upsert 账号完成 user={username}")
         except supabase_client.SupabaseError as exc:
+            _cloud_log(f"VPS←C 端 upsert 账号失败 user={username}: {exc}")
             self._error(str(exc), exc.status or 502)
             return
         self._json({"ok": True, "username": username})
@@ -1608,16 +1653,22 @@ class Handler(BaseHTTPRequestHandler):
             if direction == "push":
                 galleries = payload.get("galleries") or []
                 runs = payload.get("runs") or []
+                _cloud_log(f"VPS←C 端 推送 user={username} 作品={len(galleries)} 批次={len(runs)}")
                 pushed = supabase_client.push_user(username, galleries, runs)
+                _cloud_log(f"VPS←C 端 推送完成 user={username} 远端={pushed}")
                 self._json({"ok": True, "username": username, "pushed": pushed})
                 return
             # pull（默认）：回该用户云端全量行，供 C 端本地合并
+            _cloud_log(f"VPS←C 端 拉取 user={username}")
             data = supabase_client.fetch_user(username)
+            _cloud_log(f"VPS←C 端 拉取完成 user={username} "
+                       f"作品={len(data['galleries'])} 批次={len(data['runs'])}")
             self._json({"ok": True, "username": username,
                         "galleries": data["galleries"], "runs": data["runs"],
                         "counts": {"galleries": len(data["galleries"]),
                                    "runs": len(data["runs"])}})
         except supabase_client.SupabaseError as exc:
+            _cloud_log(f"VPS←C 端 同步失败 user={username} direction={direction}: {exc}")
             self._error(str(exc), exc.status or 502)
             return
 
