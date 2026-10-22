@@ -596,5 +596,77 @@ class CloudScrapeSinkTests(unittest.TestCase):
         self.assertEqual(result["dup"], 1)
 
 
+class CloudUserDbInitTests(unittest.TestCase):
+    """云模式注册/登录后用户库必须已建全表（settings/download_jobs/...）。
+
+    回归：云模式下 register / _cloud_login_fallback 历史上用
+    ``if not config.storage_is_cloud()`` 跳过了 init_db(user_db)，于是
+    save_credentials 写 settings.site_origin、download_queue 读
+    settings/download_jobs 都会踩 ``no such table: settings``。现在无论云/本地
+    都在建用户时初始化用户库全表（启动时 ensure_user_dbs 再兜一次）。
+    """
+
+    def setUp(self):
+        self.tmp = make_temp_dir("clouduserdb")
+        self.db_path = self.tmp / "acc.sqlite3"
+        self._orig_user_data_dir = db.config.USER_DATA_DIR
+        db.config.USER_DATA_DIR = self.tmp / "users"
+        db.init_db(self.db_path)
+        self._sb_snapshot = (
+            supabase_client.config.SUPABASE_PROJECT_REF,
+            supabase_client.config.SUPABASE_TOKEN,
+            supabase_client.config.STORAGE_BACKEND,
+        )
+        supabase_client.config.SUPABASE_PROJECT_REF = "test-project"
+        supabase_client.config.SUPABASE_TOKEN = "test-token"
+        supabase_client.config.STORAGE_BACKEND = "cloud"
+        self.fake = FakeTransport()
+        supabase_client.set_transport(self.fake)
+
+    def tearDown(self):
+        supabase_client.config.SUPABASE_PROJECT_REF, \
+            supabase_client.config.SUPABASE_TOKEN, \
+            supabase_client.config.STORAGE_BACKEND = self._sb_snapshot
+        supabase_client.set_transport(None)
+        db.config.USER_DATA_DIR = self._orig_user_data_dir
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _table_names(self, path) -> set:
+        conn = db.connect(path)
+        try:
+            return {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+        finally:
+            conn.close()
+
+    def test_register_inits_user_db_tables_in_cloud_mode(self):
+        from app.services import auth_service
+        result = auth_service.register("clouddie", "pass1234", "key", "example.net",
+                                       self.db_path)
+        self.assertTrue(result.get("ok"), result)
+        user_db = db.user_db_path("clouddie")
+        tables = self._table_names(user_db)
+        for required in ("settings", "download_jobs", "galleries", "scrape_runs"):
+            self.assertIn(required, tables,
+                          f"云模式注册后用户库缺 {required} 表")
+        # 这正是线上踩的坑：写 settings.site_origin 不应再抛 no such table
+        db.set_setting("site_origin", "https://x.example.net", user_db)
+        self.assertEqual(db.get_setting("site_origin", "", user_db),
+                         "https://x.example.net")
+
+    def test_cloud_login_fallback_inits_user_db_tables(self):
+        from app.services import auth_service
+        salt, digest = db.hash_password("pass1234")
+        self.fake.accounts["fallbacker"] = {
+            "username": "fallbacker", "api_key": "key", "site_origin": "",
+            "password_hash": digest, "salt": salt, "created_at": db.utc_now(),
+        }
+        result = auth_service.login("fallbacker", "pass1234", self.db_path)
+        self.assertTrue(result.get("ok"), result)
+        tables = self._table_names(db.user_db_path("fallbacker"))
+        self.assertIn("settings", tables)
+        self.assertIn("download_jobs", tables)
+
+
 if __name__ == "__main__":
     unittest.main()

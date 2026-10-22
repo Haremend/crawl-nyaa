@@ -19,6 +19,23 @@ from app import config, db  # noqa: E402
 from app.server import run_server  # noqa: E402
 
 
+def ensure_user_dbs() -> None:
+    """启动时统一检查/初始化用户数据：为每个已注册用户库确保全表。
+
+    用户库平时在注册/登录云回退时建；历史上云模式跳过了这一步（业务数据
+    直连 Supabase、不落本地），于是 download_jobs/settings/scrape_runs/galleries
+    缺表——下载队列（download_jobs + 兼容回退读 settings.site_origin）与
+    save_credentials 写用户库 settings 会踩到「no such table」。在启动时把
+    所有用户库幂等初始化一次（CREATE TABLE IF NOT EXISTS + 迁移），既给
+    已存在的残缺库补表，也给云模式下从未建库的用户建好全表，让两种存储
+    模式下「读侧/下载队列始终可用、写侧不依赖用户库」都成立。
+    """
+    user_paths = list(db.iter_user_db_paths(config.DB_PATH))
+    for path in user_paths:
+        db.init_db(path)
+    print(f"[启动] 数据检查   ：已为 {len(user_paths)} 个用户库确保全表")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="画廊作品列表抓取 + 本地浏览（SQLite）")
     parser.add_argument("--host", default=config.HOST, help=f"监听地址（默认 {config.HOST}）")
@@ -37,6 +54,7 @@ def main(argv=None) -> int:
           f"（云模式未配置 Supabase 时自动回退 local）")
 
     db.init_db()
+    ensure_user_dbs()
     if args.seed_demo:
         from app.demo import seed_demo
         inserted = seed_demo()

@@ -84,8 +84,10 @@ def register(username: str, password: str, api_key: str, site_origin: str,
         return {"ok": False, "error": str(exc), "status": 400}
     if not created:
         return {"ok": False, "error": "用户名已被占用", "status": 409}
-    if not config.storage_is_cloud():
-        db.init_db(db.user_db_path(created))
+    # 无论云/本地模式都初始化用户库全表：下载队列（download_jobs）、
+    # settings.site_origin 兼容回退、save_credentials 都依赖这些表存在。
+    # 云模式下业务数据（galleries/runs）虽走 Supabase，但 infra 表仍需就位。
+    db.init_db(db.user_db_path(created))
     token = db.create_session(created, path=db_path)
     max_age = config.SESSION_TTL_HOURS * 3600
     return {"ok": True, "username": created, "cloud_used": cloud_used,
@@ -150,6 +152,6 @@ def _cloud_login_fallback(username: str, password: str, db_path) -> bool:
         username, password_hash=stored_hash, salt=salt,
         api_key=str(account.get("api_key") or ""),
         site_origin=str(account.get("site_origin") or ""), path=db_path)
-    if not config.storage_is_cloud():
-        db.init_db(db.user_db_path(username))
+    # 同 register：云/本地都初始化用户库全表，避免下载队列/设置写入缺表。
+    db.init_db(db.user_db_path(username))
     return True

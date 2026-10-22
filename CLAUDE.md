@@ -49,7 +49,7 @@ AGENTS.md 是权威约束文件，本文件不重复其内容，只做入口指�
 | 任务服务 | `app/scrape_service.py` / `app/download_queue.py` | 抓取任务（后台线程、进度、取消，锁必须 `RLock`）/ 服务端并发下载队列 |
 
 其余：
-- `run.py` — 启动入口（参数解析 + `db.init_db()` + 起服务），无业务逻辑
+- `run.py` — 启动入口（参数解析 + `db.init_db()` + `ensure_user_dbs()` 起服务），无业务逻辑
 - `app/config.py` — 全部 `CLAW_*` 配置；先加载 `.env`（不覆盖已存在环境变量）
 - `app/server.py` — 内置 `ThreadingHTTPServer` + `Handler`（基础设施：guard、响应工具、静态/封面文件服务、路由分派），~540 行，业务已全下沉到三层
 - `app/parser.py` — 列表页 HTML 解析（`HTMLParser` + 正则降级）；语言来自卡片 `lang-xx` class
@@ -81,6 +81,7 @@ AGENTS.md 是权威约束文件，本文件不重复其内容，只做入口指�
 5. 增量抓取停止条件是本页 `dup > 0`（任意一条已收录即停），不是「整页重复」。
 6. 测试里 `apply_details` 只能更新已存在的行，要先 `upsert_items` 再 `apply_details`。
 7. `merge_runs_for_url()` 会改写旧条目的 `batch_id`，不是单纯删批次。
+8. 用户库（`data/users/<名>.sqlite3`）无论云/本地模式都必须 `init_db()` 全表：云模式下业务数据虽走 Supabase，但 `download_jobs`/`settings`（下载队列 + save_credentials + 站点地址回退）仍依赖本地用户库的表存在。历史 bug：云模式 register/登录回退用 `if not storage_is_cloud()` 跳过了 init，导致 `set_setting` 踩 `no such table: settings`。现由注册/登录时无条件 init + `run.py::ensure_user_dbs` 启动兜底保证。
 
 ## 测试约定
 
