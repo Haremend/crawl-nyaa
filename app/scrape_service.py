@@ -416,9 +416,11 @@ class ScrapeService:
         self._queue: deque[dict] = deque()     # 待抓取任务（不含正在跑的）
         self._logs: deque[str] = deque(maxlen=200)
         self._state: dict[str, Any] = self._idle_state()
-        # 本地模式才需要本地库；云模式 sink 不依赖 SQLite
-        if not isinstance(self.sink, CloudSink):
-            db.init_db(db_path)
+        # 队列持久化在本地 SQLite（scrape_jobs 表），无论云/本地模式都要 init
+        # （云模式业务数据走 Supabase，但队列是本地 infra，与 download_jobs 同级）。
+        db.init_db(db_path)
+        # 重启恢复：把上次未跑完的 queued / 崩溃残留的 running 任务回填进队列
+        self._load_pending()
 
     # ---------- 对外接口 ----------
     def _bool_option(self, value, default: bool) -> bool:
@@ -434,9 +436,10 @@ class ScrapeService:
         """把一个 URL 加入抓取队列；若当前空闲则立即开始，否则排队等候。
 
         URL 非法时抛 ScrapeError（controller → 400）；永远不会因「忙」而拒绝——
-        忙就排队。返回当前 snapshot（含 queue）。立即开跑的任务由本方法同步
+        忙就排队。返回当前 snapshot（含 queue）。立即开跑的任务由 _dispatch 同步
         _begin_task（snapshot 即时反映其 url/run_id），并作为 worker 线程的首参，
         不进 _queue（故 queue_length 不把它算进去）；排队任务才入 _queue。
+        任务同时 INSERT 进 scrape_jobs 表，重启可恢复。
         """
         with self._lock:
             # 校验在入队时同步完成，让调用方立刻拿到 400 而不是后台才失败
@@ -459,20 +462,58 @@ class ScrapeService:
                 "covers": self._bool_option(covers, config.COVER_DEFAULT),
                 "incremental": self._bool_option(incremental, config.INCREMENTAL),
             }
-            idle = self._thread is None or not self._thread.is_alive()
-            if idle:
-                # 立即开跑：同步建批次 + 写状态，让 snapshot 即时正确
-                run_id, site_domain = self._begin_task(task)
-                task["_run_id"] = run_id
-                task["_site_domain"] = site_domain
-                self._thread = threading.Thread(
-                    target=self._worker, args=(task,), name="gallery-scrape",
-                    daemon=True)
-                self._thread.start()
-            else:
-                # 正在抓：排队，worker 跑完当前会从 _queue 取下一个
-                self._queue.append(task)
+            task["job_id"] = db.insert_scrape_job(
+                clean_url,
+                {"max_pages": pages, "delay": delay_value,
+                 "enrich": task["enrich"], "covers": task["covers"],
+                 "incremental": task["incremental"]},
+                path=self.db_path,
+            )
+            self._dispatch(task)
             return self.snapshot()
+
+    def _dispatch(self, task: dict) -> None:
+        """把一个任务派给 worker：空闲则立即开跑（同步 _begin_task + 启 worker
+        以本任务为首参），忙则入 _queue 排队。调用方持锁。
+        """
+        idle = self._thread is None or not self._thread.is_alive()
+        if idle:
+            # 立即开跑：同步建批次 + 写状态，让 snapshot 即时正确
+            run_id, site_domain = self._begin_task(task)
+            task["_run_id"] = run_id
+            task["_site_domain"] = site_domain
+            self._thread = threading.Thread(
+                target=self._worker, args=(task,), name="gallery-scrape",
+                daemon=True)
+            self._thread.start()
+        else:
+            # 正在抓：排队，worker 跑完当前会从 _queue 取下一个
+            self._queue.append(task)
+
+    def _load_pending(self) -> None:
+        """重启恢复：从 scrape_jobs 表加载未完成任务回填进内存队列。
+
+        崩溃残留的 running 先 reset 成 queued，再按入队顺序逐个 _dispatch。
+        """
+        db.reset_running_scrape_jobs(self.db_path)
+        rows = db.list_pending_scrape_jobs(self.db_path)
+        if not rows:
+            return
+        with self._lock:
+            for row in rows:
+                opts = row.get("options") or {}
+                task = {
+                    "url": row["url"],
+                    "max_pages": int(opts.get("max_pages", 0) or 0),
+                    "delay": float(opts.get("delay", config.PAGE_DELAY) or config.PAGE_DELAY),
+                    "enrich": bool(opts.get("enrich", config.ENRICH_DEFAULT)),
+                    "covers": bool(opts.get("covers", config.COVER_DEFAULT)),
+                    "incremental": bool(opts.get("incremental", config.INCREMENTAL)),
+                    "job_id": row["job_id"],
+                }
+                self._dispatch(task)
+            if self._thread is not None and self._thread.is_alive():
+                self._log(f"重启恢复：已载入 {len(rows)} 个未完成抓取任务，继续按序处理")
 
     def _begin_task(self, task: dict) -> tuple[int, str]:
         """取一个排队任务，做建批次/写站点/重置状态等开跑前准备（调用方持锁）。
@@ -530,34 +571,58 @@ class ScrapeService:
             self._log("增量抓取已关闭：将完整抓取整个列表")
         return run_id, site_domain
 
-    def _worker(self, first_task: dict) -> None:
-        """单 worker：先跑 start() 同步 begun 的首任务，再循环取 _queue 下一个。
+    def _run_task(self, task: dict) -> None:
+        """跑单个任务：建批次（首任务已由 _dispatch begun 则跳过）、标 job running、
+        执行 _run、跑完按最终状态更新 job 行。抓取循环 _run() 不持锁。
+        """
+        with self._lock:
+            if task.get("_run_id") is not None:
+                run_id = task["_run_id"]
+                site_domain = task["_site_domain"]
+            else:
+                run_id, site_domain = self._begin_task(task)
+            job_id = task.get("job_id")
+            if job_id:
+                db.update_scrape_job(job_id, status="running",
+                                     started_at=db.utc_now(), path=self.db_path)
+        self._run(run_id, task["url"], task["max_pages"], task["delay"],
+                  task["enrich"], task["covers"], site_domain, task["incremental"])
+        # _run 的 finally 已把最终 status 写进 _state；读出来回写 job 行
+        with self._lock:
+            final_status = str(self._state.get("status") or "done")
+            error = self._state.get("error")
+        if job_id:
+            db.update_scrape_job(job_id, status=final_status,
+                                 finished_at=db.utc_now(), error=error,
+                                 path=self.db_path)
+            db.cleanup_finished_scrape_jobs(self.db_path)
 
-        退出时不动 _state（保留最后一个任务的最终状态，便于前端展示完成态）；
-        下一个任务入队时 start() 会重启 worker，_begin_task 会重置 _state。
+    def _worker(self, first_task: dict | None = None) -> None:
+        """单 worker：先跑首任务（start/_dispatch 同步 begun 的，或恢复时的第一个），
+        再循环取 _queue 下一个。退出时不动 _state（保留最后一个任务的最终状态）。
         串行化防丢失唤醒：start() 在 _lock 内检查 worker 存活 + append，与本处
         「队列空就退出」由同一把 _lock 串行，不会丢任务。
         """
-        # 首任务已由 start() 同步 _begin_task，这里直接跑
-        self._run(first_task["_run_id"], first_task["url"], first_task["max_pages"],
-                  first_task["delay"], first_task["enrich"], first_task["covers"],
-                  first_task["_site_domain"], first_task["incremental"])
+        if first_task is not None:
+            self._run_task(first_task)
         while True:
             with self._lock:
                 if not self._queue:
                     return  # 队列空：退出，_state 保留上次最终状态
                 task = self._queue.popleft()
-                run_id, site_domain = self._begin_task(task)
-            # 抓取循环本身不持锁，snapshot/cancel 可并发读
-            self._run(run_id, task["url"], task["max_pages"], task["delay"],
-                      task["enrich"], task["covers"], site_domain, task["incremental"])
+            self._run_task(task)
 
     def cancel(self) -> bool:
-        """取消当前正在抓取的任务 + 清空整个待抓取队列（停止一切）。"""
+        """取消当前正在抓取的任务 + 清空整个待抓取队列（停止一切）。
+
+        queued 任务在表里标 cancelled；running 任务由 _run_task 跑完时据
+        _state.status='cancelled' 回写。
+        """
         with self._lock:
             alive = self._thread is not None and self._thread.is_alive()
             had_queued = len(self._queue) > 0
             self._queue.clear()
+        db.cancel_queued_scrape_jobs(self.db_path)
         if alive:
             self._cancel.set()
             self._log("收到取消请求，停止当前任务并清空待抓取队列…")

@@ -205,6 +205,71 @@ class ServiceStartTests(unittest.TestCase):
         finally:
             service_module.iter_pages = original_iter_pages
 
+    def test_queue_persists_across_restart(self):
+        """重启恢复：表里的 queued 任务在新实例启动时被载入内存队列。
+
+        场景：上次进程（或崩溃后）表里留着 queued 任务 → 新 ScrapeService
+        的 __init__ 会 reset_running + 载入 pending 回填 _queue。这里不真跑
+        （构造空选项），只验证「载入」这一步，避免多实例争抢同一张表。
+        """
+        # 直接往表里造 2 条 queued + 1 条崩溃残留 running
+        db.init_db(self.db_path)
+        for i, url in enumerate(("https://example.net/group/a/",
+                                 "https://example.net/group/b/")):
+            db.insert_scrape_job(url, {"max_pages": 0, "delay": 0.1}, path=self.db_path)
+        running_id = db.insert_scrape_job("https://example.net/group/c/",
+                                          {"max_pages": 0, "delay": 0.1},
+                                          path=self.db_path)
+        db.update_scrape_job(running_id, status="running",
+                             started_at=db.utc_now(), path=self.db_path)
+
+        # 新实例（模拟重启）：把 pending（含 reset 后的 running）载入内存队列
+        scrape = ScrapeService(self.db_path)
+        snap = scrape.snapshot()
+        # 载入的 worker 会立即跑第一个 → running=True；其余在 queue 里
+        # 3 条任务：1 条在跑 + 2 条排队（顺序按 job_id）
+        total = snap["queue_length"] + (1 if snap["running"] else 0)
+        self.assertEqual(total, 3, "重启应恢复全部 3 个未完成任务")
+        # 崩溃残留的 running 已被 reset 成 queued；首任务被 worker 重新 running。
+        # 因此表里最多 1 条 running（正在跑的那个），绝不会 >1。
+        pending = db.list_pending_scrape_jobs(self.db_path)
+        self.assertEqual(len(pending), 3, "3 个未完成任务都应在 pending 里")
+        self.assertLessEqual(sum(1 for r in pending if r["status"] == "running"), 1,
+                             "最多 1 条 running（正在跑的那个），崩溃残留已 reset")
+        # 清理：停掉 worker，避免污染后续
+        scrape.cancel()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and scrape.snapshot()["running"]:
+            time.sleep(0.05)
+
+    def test_restarted_tasks_run_to_completion(self):
+        """重启恢复的任务能被跑完，表里不再有 pending。"""
+        original_iter_pages = service_module.iter_pages
+
+        def fast_iter_pages(url, **_kwargs):
+            yield PageResult(page_no=1, url=url, items=[], last_page=1, has_next=False)
+
+        service_module.iter_pages = fast_iter_pages
+        try:
+            db.init_db(self.db_path)
+            db.insert_scrape_job("https://example.net/group/x/",
+                                 {"max_pages": 0, "delay": 0.1, "enrich": False},
+                                 path=self.db_path)
+            db.insert_scrape_job("https://example.net/group/y/",
+                                 {"max_pages": 0, "delay": 0.1, "enrich": False},
+                                 path=self.db_path)
+            scrape = ScrapeService(self.db_path)   # 载入 2 个 pending
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and scrape.snapshot()["running"]:
+                time.sleep(0.05)
+            snap = scrape.snapshot()
+            self.assertFalse(snap["running"])
+            self.assertEqual(snap["queue_length"], 0)
+            self.assertEqual(db.list_pending_scrape_jobs(self.db_path), [],
+                             "恢复任务跑完后表里不应再有 pending")
+        finally:
+            service_module.iter_pages = original_iter_pages
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -66,6 +66,13 @@ from .dao.jobs import (  # noqa: F401
     cancel_job, cancel_queued_jobs, reset_stale_jobs,
 )
 
+# scrape_jobs：抓取队列持久化（重启恢复）
+from .dao.scrape_jobs import (  # noqa: F401
+    insert_scrape_job, list_pending_scrape_jobs, update_scrape_job,
+    cancel_queued_scrape_jobs, reset_running_scrape_jobs,
+    cleanup_finished_scrape_jobs,
+)
+
 # cloud_merge：云端行导出/合并写本地
 from .dao.cloud_merge import (  # noqa: F401
     all_gallery_rows, all_run_rows, row_updated_at,

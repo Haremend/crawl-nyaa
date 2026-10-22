@@ -87,6 +87,20 @@ CREATE INDEX IF NOT EXISTS idx_jobs_gallery ON download_jobs(gallery_id);
 -- 注意：idx_jobs_username 不放在 SCHEMA 里，否则旧库（download_jobs 还没有
 -- username 列）会在 executescript 阶段建索引失败；它在下面的迁移块里建。
 
+CREATE TABLE IF NOT EXISTS scrape_jobs (
+    job_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    username    TEXT NOT NULL DEFAULT '',
+    url         TEXT NOT NULL,
+    options     TEXT NOT NULL DEFAULT '{}',
+    status      TEXT NOT NULL DEFAULT 'queued',
+    created_at  TEXT NOT NULL,
+    started_at  TEXT,
+    finished_at TEXT,
+    error       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_scrape_jobs_status ON scrape_jobs(status);
+
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT ''
