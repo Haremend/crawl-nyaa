@@ -69,7 +69,7 @@ def get_works(h, query) -> None:
     want_only = (query.get("want", ["0"])[0] or "0").lower() not in ("0", "false", "no")
     downloaded_only = (query.get("downloaded", ["0"])[0] or "0").lower() not in ("0", "false", "no")
     site_only = (query.get("site_favorites", ["0"])[0] or "0").lower() not in ("0", "false", "no")
-    batch_id = int_param(query, "batch", 0, 0, 10 ** 9) or None
+    batch_id = int_param(query, "batch", 0, 0, 10 ** 13) or None
     page = int_param(query, "page", 1, 1, 100000)
     per_page = int_param(query, "per_page", 24, 1, 200)
     filters = {

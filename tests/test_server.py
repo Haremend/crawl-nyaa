@@ -151,5 +151,62 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(meta["stats"]["entries"], 0)
 
 
+class BatchTimestampFilterTests(unittest.TestCase):
+    """云端 run_id 是毫秒时间戳（13 位，~1.79 万亿）；选批次后
+    /api/works?batch=<ts> 不能被 int_param 的 high 上限夹断。
+
+    回归 bug：int_param(query,"batch",0,0,10**9) 把 1792575483429 夹成
+    1000000000 → 选批次后列表显示「没有符合当前筛选条件的作品」。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from app import config as _c, supabase_client as _s
+        _c.STORAGE_BACKEND = "local"
+        _c.SUPABASE_PROJECT_REF = ""
+        _c.SUPABASE_TOKEN = ""
+        _s.set_transport(None)
+        cls.tmp = make_temp_dir("batch_ts")
+        cls.db_path = cls.tmp / "batch_ts.sqlite3"
+        db.init_db(cls.db_path)
+        from app.parser import GalleryItem
+        db.upsert_items(
+            [GalleryItem(gallery_id=777777, url="https://example.net/g/777777/",
+                         title="Timestamp batch test", languages=["japanese"])],
+            source_url="https://example.net/group/x/",
+            batch_id=1792575483429, path=cls.db_path)
+        cls.server = ApiServer(("127.0.0.1", 0), Handler, db_path=cls.db_path)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.base = f"http://127.0.0.1:{cls.server.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_batch_filter_returns_items_for_13_digit_run_id(self):
+        status, data = self._get_json("/api/works?batch=1792575483429")
+        self.assertEqual(status, 200)
+        self.assertGreater(data["total"], 0,
+                           "选批次后应能查到该批次的作品，不能被 int_param 夹断")
+
+    def test_download_targets_accepts_13_digit_batch_id(self):
+        status, data = self._get_json(
+            "/api/download/targets?mode=batch&batch_id=1792575483429")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["batch_id"], 1792575483429,
+                         "batch_id 原样回传，不能被夹成 10**9")
+
+    def _get_json(self, path):
+        try:
+            with urllib.request.urlopen(self.base + path, timeout=5) as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8") or "{}")
+
+
 if __name__ == "__main__":
     unittest.main()

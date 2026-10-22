@@ -20,7 +20,7 @@ def get_download_targets(h, query) -> None:
     redownload = query.get("redownload", ["0"])[0] not in ("1", "true", "yes")
     skip = not redownload
     if mode == "batch":
-        batch = int_param(query, "batch_id", 0, 0, 10 ** 9)
+        batch = int_param(query, "batch_id", 0, 0, 10 ** 13)
         if batch <= 0:
             h._error("缺少 batch_id", 400)
             return

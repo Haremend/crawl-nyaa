@@ -282,7 +282,7 @@ def batch_targets(user: dict | None, user_db: Path | None, batch_id: int, *,
     if cloud_mode:
         return _cloud_batch_targets(username, batch_id,
                                     skip_downloaded=skip_downloaded)
-    return db.list_batch_targets(user_db, batch_id, skip_downloaded=skip_downloaded)
+    return db.list_batch_targets(batch_id, user_db, skip_downloaded=skip_downloaded)
 
 
 def validate_key(api_key: str, origin: str) -> dict | None:
