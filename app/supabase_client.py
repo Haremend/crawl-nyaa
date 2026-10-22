@@ -659,3 +659,19 @@ def cloud_fetch_run_rows(username) -> list[dict]:
     """拉取某用户全部批次行（云模式批次列表的数据源）。"""
     data = fetch_user(username)
     return data["runs"]
+
+
+def reset_user_data(username) -> dict:
+    """云模式清空某用户的作品与批次行（账号/会话保留）。
+
+    封装原 server._cloud_reset 的裸 SQL DELETE；返回 {"galleries": n, "runs": m}
+    （n/m 为受影响的行数，查询/删除失败时按 0 计）。
+    """
+    _require_config()
+    name = _literal(str(username))
+    g = run_sql(
+        f'delete from public.{_q(GALLERIES_TABLE)} where "username" = {name}')
+    r = run_sql(
+        f'delete from public.{_q(RUNS_TABLE)} where "username" = {name}')
+    return {"galleries": len(g) if isinstance(g, list) else 0,
+            "runs": len(r) if isinstance(r, list) else 0}
