@@ -94,8 +94,25 @@ function renderDownloadMode(mode) {
 
 function renderSiteChip(origin) {
   const value = (origin || "").trim();
-  $("siteChip").textContent = value ? ("站点 " + value.replace(/^https?:\/\//, "")) : "站点 未设置";
-  $("siteChip").title = value || "尚未设置站点域名";
+  $("siteChip").textContent = value ? ("站点 " + value.replace(/^https?:\/\//, "")) : "站点 未配置";
+  $("siteChip").title = value ? "当前使用的站点地址" : "尚未设置站点域名";
+}
+
+/* 顶部「Key」chip：未配置 Key 时显示「未配置 Key」提示，已配置显示「更换 Key」。
+   登录用户的 Key 跟账号走，按其 has_api_key 判断。 */
+function renderKeyChip() {
+  const btn = $("changeKeyBtn");
+  if (!btn) return;
+  const hasKey = state.user ? Boolean(state.user.has_api_key) : Boolean(state.key);
+  if (hasKey) {
+    btn.textContent = "更换 Key";
+    btn.title = state.user ? "在设置里修改站点域名 / API Key" : "清除浏览器里保存的 API Key 并重新输入";
+    btn.classList.remove("unconfigured");
+  } else {
+    btn.textContent = "未配置 Key";
+    btn.title = "尚未配置 API Key：点击填写";
+    btn.classList.add("unconfigured");
+  }
 }
 
 function prefillGate(meta) {
@@ -106,6 +123,8 @@ function prefillGate(meta) {
 }
 
 function showGate(message) {
+  // 每次弹出前预填已知的站点域名 / Key（来自 meta 或 cookie），减少用户重输
+  prefillGate(state.meta);
   $("gate").hidden = false;
   $("gateHint").textContent = message || "也可以用 ?apikey=你的KEY 直接进入（进入后会自动从地址栏移除）。";
   $("gateInput").value = "";
@@ -114,6 +133,11 @@ function showGate(message) {
 
 function hideGate() {
   $("gate").hidden = true;
+}
+
+function closeGate() {
+  hideGate();
+  toast("已关闭。点击顶部「Key」可重新填写。", "info");
 }
 
 /**
@@ -152,6 +176,7 @@ async function submitGate() {
   state.key = key;
   writeCookie(KEY_COOKIE, key);
   hideGate();
+  renderKeyChip();
   toast("已保存域名与 API Key", "ok");
   try {
     await reloadAll();
@@ -176,6 +201,7 @@ async function loadAuth() {
     state.user = null;
   }
   renderAuth();
+  renderKeyChip();
 }
 
 function renderAuth() {
@@ -530,6 +556,7 @@ async function loadMeta() {
   renderLastRun(meta.stats.last_run);
   renderDownloadSummary(meta.download_status);
   renderSiteChip(meta.site_origin);
+  renderKeyChip();
   renderDownloadMode(meta.download_mode);
   state.batches = meta.batches || [];
   renderBatchOptions();
@@ -1244,10 +1271,12 @@ function bindEvents() {
   const clearKey = (message) => {
     deleteCookie(KEY_COOKIE);
     state.key = "";
+    renderKeyChip();
     toast(message);
     showGate("已清除保存的 Key，请重新输入。");
   };
   $("gateClear").addEventListener("click", () => clearKey("已清除浏览器里保存的 Key"));
+  $("gateClose").addEventListener("click", closeGate);
   $("changeKeyBtn").addEventListener("click", () => {
     // 登录用户的 Key 跟账号走，去设置面板改；匿名用户才走清 cookie 门禁
     if (state.user) { openSettingsModal(); return; }
@@ -1479,9 +1508,11 @@ function bindEvents() {
     openAuthModal("login");
     return;
   }
+  // 本地模式未登录：不再自动弹门禁（由顶部「未配置 Key / 站点未配置」chip 引导）。
+  // 仅当 URL 带了 ?apikey= 或 cookie 里已有 Key 才直接进入浏览。
   if (!state.key) {
-    prefillGate(state.meta);
-    showGate();
+    hideGate();
+    // 顶部 chip 此时显示「未配置 Key」/「站点 未配置」，点击即可开门禁补全
     return;
   }
   try {
