@@ -1074,6 +1074,43 @@ async function startDownloadAll() {
   }
 }
 
+/** 当前筛选条件 → 参数对象（lang 等多值保留数组），供 /api/download/filter。 */
+function filterParamsObject() {
+  const params = buildParams(false);
+  const obj = {};
+  for (const key of new Set(params.keys())) {
+    const values = params.getAll(key);
+    obj[key] = values.length > 1 ? values : values[0];
+  }
+  return obj;
+}
+
+/** 服务端保存：把当前筛选结果（整份、去重后推荐版本）全部入队。 */
+async function startDownloadFilter() {
+  const total = (state.data && state.data.total) || 0;
+  if (total <= 0) { toast("当前筛选条件下没有作品", "error"); return; }
+  if (!window.confirm("将下载当前筛选结果共 " + total + " 部（每部下载推荐版本），确认全部入队？")) return;
+  if (state.saveMode === "local") { return localLoop("filter", 0); }
+  const fmt = $("formatSelect").value || "zip";
+  $("downloadFilterBtn").disabled = true;
+  $("dlProgressPanel").hidden = false;
+  try {
+    const data = await api("/api/download/filter", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        filters: filterParamsObject(), format: fmt, redownload: redownloadEnabled(),
+      }),
+    });
+    toast("已加入队列 " + (data.queued || 0) + " 个任务");
+    startDownloadPolling();
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    $("downloadFilterBtn").disabled = false;
+  }
+}
+
 /** 保存全部：把当前批次的全部作品入队。 */
 async function saveCurrentBatch() {
   if (!state.batchId) { toast("请先在顶部选择一个批次", "error"); return; }
@@ -1107,12 +1144,21 @@ async function localLoop(mode, batchId) {
   try {
     const params = new URLSearchParams({ mode: mode });
     if (mode === "batch") params.set("batch_id", String(batchId));
+    if (mode === "filter") {
+      // 本地保存的「下载当前结果」：目标列表由后端按当前筛选条件重查
+      const bp = buildParams(false);
+      for (const key of new Set(bp.keys())) {
+        bp.getAll(key).forEach((value) => params.append(key, value));
+      }
+    }
     if (redownloadEnabled()) params.set("redownload", "1");
     const plan = await api("/api/download/targets?" + params.toString(),
                            { loadingText: "准备下载清单…" });
     const items = plan.items || [];
     if (!items.length) {
-      throw new Error(mode === "batch" ? "该批次没有可下载的作品" : "没有标记为「待下载」的作品");
+      throw new Error(mode === "batch" ? "该批次没有可下载的作品"
+        : mode === "filter" ? "当前筛选条件下没有可下载的作品"
+        : "没有标记为「待下载」的作品");
     }
     let queued = 0;
     for (const target of items) {
@@ -1379,6 +1425,7 @@ function bindEvents() {
   });
 
   $("downloadAllBtn").addEventListener("click", startDownloadAll);
+  $("downloadFilterBtn").addEventListener("click", startDownloadFilter);
   $("downloadCancelBtn").addEventListener("click", async () => {
     if (state.localRunning) {
       state.localCancel = true;

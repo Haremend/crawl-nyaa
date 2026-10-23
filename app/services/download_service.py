@@ -285,6 +285,47 @@ def batch_targets(user: dict | None, user_db: Path | None, batch_id: int, *,
     return db.list_batch_targets(batch_id, user_db, skip_downloaded=skip_downloaded)
 
 
+def filter_targets(filters: dict, user: dict | None, user_db,
+                   *, cloud_mode: bool, skip_downloaded: bool) -> list[dict]:
+    """「下载当前筛选结果」的目标列表：按 /api/works 同名筛选参数重查全部页，
+    取每个去重组的推荐版本（item.gallery_id）作下载目标。
+
+    云模式天然走 works_service.list_works → cloud_service.query_works；
+    云模式无登录时 list_works 返回带 error 的结构，这里视作无目标返回空。
+    """
+    from app.services import works_service
+    base = dict(filters or {})
+    targets: list[dict] = []
+    page = 1
+    max_pages = 10000  # 防御性上限，避免异常 pages 字段导致死循环
+    while page <= max_pages:
+        f = dict(base)
+        f["page"] = page
+        f["per_page"] = 200
+        data = works_service.list_works(f, user, user_db)
+        if not isinstance(data, dict) or "items" not in data:
+            break
+        page_items = data.get("items") or []
+        for item in page_items:
+            if skip_downloaded and item.get("downloaded"):
+                continue
+            try:
+                gid = int(item.get("gallery_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if gid > 0:
+                targets.append({"gallery_id": gid,
+                                "title": str(item.get("title") or "")})
+        try:
+            pages = int(data.get("pages") or 1)
+        except (TypeError, ValueError):
+            pages = 1
+        if not page_items or page >= pages:
+            break
+        page += 1
+    return targets
+
+
 def validate_key(api_key: str, origin: str) -> dict | None:
     """向上游 get_user 校验 Key；失败返回 {"error","status"}，成功返回 None。"""
     try:

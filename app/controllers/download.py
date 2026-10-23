@@ -7,13 +7,13 @@ from __future__ import annotations
 
 from urllib.parse import parse_qs, urlsplit
 
-from app import config, db
-from app.controllers.util import int_param
+from app import config, db, supabase_client
+from app.controllers.util import int_param, parse_works_filters
 from app.services import download_service, works_service
 
 
 def get_download_targets(h, query) -> None:
-    """GET /api/download/targets：mode=want|batch 的目标列表（供浏览器循环下载）。"""
+    """GET /api/download/targets：mode=want|batch|filter 的目标列表（供浏览器循环下载）。"""
     mode = (query.get("mode", ["want"])[0] or "want").lower()
     user = h._current_user()
     user_db = h._user_db_path(user)
@@ -29,6 +29,19 @@ def get_download_targets(h, query) -> None:
             skip_downloaded=skip)
         h._json({"ok": True, "mode": "batch", "batch_id": batch,
                  "items": items, "total": len(items)})
+    elif mode == "filter":
+        # 与 /api/works 同名筛选参数（q/lang/dedupe/sort/uncensored/want/
+        # downloaded/site_favorites/batch），前端 buildParams(false) 直接可拼
+        filters = parse_works_filters(query)
+        try:
+            items = download_service.filter_targets(
+                filters, user, user_db, cloud_mode=config.storage_is_cloud(),
+                skip_downloaded=skip)
+        except supabase_client.SupabaseError as exc:
+            h._error(str(exc), exc.status or 502)
+            return
+        h._json({"ok": True, "mode": "filter", "items": items,
+                 "total": len(items)})
     else:
         items = download_service.want_targets(
             user, user_db, cloud_mode=config.storage_is_cloud(),
@@ -241,6 +254,80 @@ def post_download_start(h) -> None:
     username = user.get("username", "") if user else ""
     result = h.server.download_queue.enqueue_many(
         targets, fmt, api_key=api_key, source="want", username=username, origin=origin)
+    h._json({"ok": True, "queued": result["queued"], "total": len(targets),
+             "queue": h._filtered_jobs(user)})
+
+
+def normalize_works_filters(payload: dict | None) -> dict:
+    """POST body 里的 filters（URLSearchParams 转对象）→ works filters dict。
+
+    与 GET /api/works 的 query 参数同语义（q/lang/dedupe/sort/uncensored/
+    want/downloaded/site_favorites/batch），保证「下载当前筛选结果」与页面
+    当前列表条件完全一致。
+    """
+    payload = payload or {}
+
+    def as_list(value):
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(v) for v in value]
+        return [str(value)]
+
+    query = {
+        "q": as_list(payload.get("q")) or [""],
+        "lang": as_list(payload.get("lang")),
+        "dedupe": as_list(payload.get("dedupe", "1")),
+        "sort": as_list(payload.get("sort", "recent")),
+        "uncensored": as_list(payload.get("uncensored", "0")),
+        "want": as_list(payload.get("want", "0")),
+        "downloaded": as_list(payload.get("downloaded", "0")),
+        "site_favorites": as_list(payload.get("site_favorites", "0")),
+        "batch": as_list(payload.get("batch")),
+    }
+    return parse_works_filters(query)
+
+
+def post_download_filter(h) -> None:
+    """POST /api/download/filter：入队「当前筛选结果」的全部目标（推荐版本）。
+
+    与 /api/download/start（待下载）、/api/batch/save（批次）对称：按当前
+    筛选条件重查整份结果并入队，source="filter"。
+    """
+    payload = h._read_json()
+    if payload is None:
+        return
+    user = h._current_user()
+    api_key = h._resolve_api_key(parse_qs(urlsplit(h.path).query), user)
+    if not api_key:
+        h._error("缺少 API Key", 401)
+        return
+    origin = h._site_origin(user)
+    if not origin:
+        h._error("未知站点地址：请先抓取一次列表页", 400)
+        return
+    validation = download_service.validate_key(api_key, origin)
+    if validation:
+        h._error(validation["error"], validation["status"])
+        return
+    fmt = str(payload.get("format") or "zip")
+    redownload = bool(payload.get("redownload", False))
+    filters = normalize_works_filters(payload.get("filters") or {})
+    try:
+        targets = download_service.filter_targets(
+            filters, user, h._user_db_path(user),
+            cloud_mode=config.storage_is_cloud(),
+            skip_downloaded=not redownload)
+    except supabase_client.SupabaseError as exc:
+        h._error(str(exc), exc.status or 502)
+        return
+    if not targets:
+        h._error("当前筛选条件下没有需要下载的作品（可勾选「重新下载」忽略已下载标记）", 400)
+        return
+    username = user.get("username", "") if user else ""
+    result = h.server.download_queue.enqueue_many(
+        targets, fmt, api_key=api_key, source="filter",
+        username=username, origin=origin)
     h._json({"ok": True, "queued": result["queued"], "total": len(targets),
              "queue": h._filtered_jobs(user)})
 

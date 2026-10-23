@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from app import config, db
 from app import supabase_client
-from app.controllers.util import int_param
+from app.controllers.util import int_param, parse_works_filters
 from app.services import cloud_service, works_service, favorites_service, sync_service
 
 
@@ -61,25 +61,7 @@ def get_batches(h) -> None:
 def get_works(h, query) -> None:
     user = h._current_user()
     user_db = h._user_db_path(user)
-    q = (query.get("q", [""])[0] or "").strip() or None
-    languages = [v.strip().lower() for v in query.get("lang", []) if v.strip()]
-    dedupe = (query.get("dedupe", ["1"])[0] or "1").lower() not in ("0", "false", "no")
-    sort = (query.get("sort", ["recent"])[0] or "recent").lower()
-    if sort not in ("recent", "oldest", "title", "original", "variants", "favorites", "pages", "priority"):
-        sort = "recent"
-    uncensored = (query.get("uncensored", ["0"])[0] or "0").lower() not in ("0", "false", "no")
-    want_only = (query.get("want", ["0"])[0] or "0").lower() not in ("0", "false", "no")
-    downloaded_only = (query.get("downloaded", ["0"])[0] or "0").lower() not in ("0", "false", "no")
-    site_only = (query.get("site_favorites", ["0"])[0] or "0").lower() not in ("0", "false", "no")
-    batch_id = int_param(query, "batch", 0, 0, 10 ** 13) or None
-    page = int_param(query, "page", 1, 1, 100000)
-    per_page = int_param(query, "per_page", 24, 1, 200)
-    filters = {
-        "q": q, "languages": languages, "dedupe_title": dedupe, "sort": sort,
-        "page": page, "per_page": per_page, "uncensored": uncensored,
-        "want_download_only": want_only, "downloaded_only": downloaded_only,
-        "site_favorites_only": site_only, "batch_id": batch_id,
-    }
+    filters = parse_works_filters(query)
     try:
         data = works_service.list_works(filters, user, user_db)
     except supabase_client.SupabaseError as exc:
