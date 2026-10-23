@@ -95,8 +95,12 @@ def register(username: str, password: str, api_key: str, site_origin: str,
             "max_age": max_age}
 
 
-def login(username: str, password: str, db_path) -> dict:
+def login(username: str, password: str, db_path, sync_creds: bool = False) -> dict:
     """登录：本地 verify 优先；失败且（remote 或 supabase 可用）时走云回退。
+
+    sync_creds=True（需求基线 §12.4）：登录成功后用云端账号的 site_origin/api_key
+    覆盖本地该账号行这两个字段；False 时只用本地值，不被云端覆盖。
+    云回退重建（本地无该账号）时云端凭据作为初始值写入（开关语义自然成立）。
 
     返回 {ok, username, session_token, max_age, error, status}。
     """
@@ -105,14 +109,21 @@ def login(username: str, password: str, db_path) -> dict:
     if not username or not password:
         return {"ok": False, "error": "请输入用户名和密码", "status": 400}
     local_ok = db.verify_user(username, password, db_path)
+    cloud_used = False
     if not local_ok:
         if not ((config.remote_configured() or supabase_client.configured())
                 and _cloud_login_fallback(username, password, db_path)):
             return {"ok": False, "error": "用户名或密码错误", "status": 401}
+        cloud_used = True
+    elif sync_creds and config.remote_configured() is False and supabase_client.configured():
+        # 本地验证通过但开了「同步云端配置」：拉云端账号的凭据覆盖本地
+        _overlay_cloud_creds(username, db_path)
+    elif sync_creds and config.remote_configured():
+        _overlay_remote_creds(username, db_path)
     token = db.create_session(username, path=db_path)
     max_age = config.SESSION_TTL_HOURS * 3600
     return {"ok": True, "username": username, "session_token": token,
-            "max_age": max_age}
+            "max_age": max_age, "creds_synced": bool(sync_creds) or cloud_used}
 
 
 def _cloud_login_fallback(username: str, password: str, db_path) -> bool:
@@ -155,3 +166,28 @@ def _cloud_login_fallback(username: str, password: str, db_path) -> bool:
     # 同 register：云/本地都初始化用户库全表，避免下载队列/设置写入缺表。
     db.init_db(db.user_db_path(username))
     return True
+
+
+def _overlay_cloud_creds(username: str, db_path) -> None:
+    """拉云端账号的 site_origin/api_key，覆盖本地该账号行这两个字段（§12.4）。
+
+    best-effort：云端不可用/无账号时静默跳过，不阻断登录。
+    """
+    try:
+        if config.remote_configured():
+            account = remote_client.get_client().fetch_account(username) or {}
+        else:
+            account = supabase_client.fetch_account(username) or {}
+        if account:
+            db.upsert_user_credentials(
+                username, password_hash="", salt="",
+                api_key=str(account.get("api_key") or ""),
+                site_origin=str(account.get("site_origin") or ""),
+                path=db_path, preserve_auth=True)
+    except (remote_client.RemoteError, supabase_client.SupabaseError) as exc:
+        cloud_log(f"登录同步云端配置失败 user={username}: {exc}")
+
+
+def _overlay_remote_creds(username: str, db_path) -> None:
+    """remote VPS 分支的「同步云端配置」：拉 VPS 账号行的凭据覆盖本地。"""
+    _overlay_cloud_creds(username, db_path)

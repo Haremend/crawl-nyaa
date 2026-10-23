@@ -175,24 +175,30 @@ def update_user_settings(username: str, *, api_key: str | None = None,
 
 def upsert_user_credentials(username: str, *, password_hash: str, salt: str,
                             api_key: str = "", site_origin: str = "",
-                            path: str | Path | None = None) -> None:
+                            path: str | Path | None = None,
+                            preserve_auth: bool = False) -> None:
     """覆写本地账号行的哈希/盐/Key/域名（登录云回退重建用户用）。
 
     公开方法，供 service 层调用；行为等价于旧的「直接摸 _WRITE_LOCK 改
     users 表」，但走正规 connect，不留层泄漏。
+
+    preserve_auth=True 时只更新 api_key/site_origin，password_hash/salt 保持
+    原值（登录「同步云端配置」开关用：拉云端凭据覆盖，但不破坏本地密码）。
     """
     username = (username or "").strip()
     if not username:
         return
+    if preserve_auth:
+        updates = ("api_key = ?, site_origin = ?")
+        params = [str(api_key or "").strip(), str(site_origin or "").strip(), username]
+    else:
+        updates = ("password_hash = ?, salt = ?, api_key = ?, site_origin = ?")
+        params = [str(password_hash or ""), str(salt or ""),
+                  str(api_key or "").strip(), str(site_origin or "").strip(), username]
     with _WRITE_LOCK:
         conn = connect(path)
         try:
-            conn.execute(
-                "UPDATE users SET password_hash = ?, salt = ?, api_key = ?, "
-                "site_origin = ? WHERE username = ?",
-                (password_hash, salt, str(api_key or ""),
-                 str(site_origin or ""), username),
-            )
+            conn.execute(f"UPDATE users SET {updates} WHERE username = ?", params)
             conn.commit()
         finally:
             conn.close()

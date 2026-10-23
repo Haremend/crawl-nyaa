@@ -66,7 +66,8 @@ def post_login(h) -> None:
     if payload is None:
         return
     result = auth_service.login(
-        payload.get("username"), payload.get("password"), h.server.db_path)
+        payload.get("username"), payload.get("password"), h.server.db_path,
+        sync_creds=bool(payload.get("sync_creds", False)))
     if not result.get("ok"):
         h._error(result.get("error", "用户名或密码错误"), result.get("status", 401))
         return

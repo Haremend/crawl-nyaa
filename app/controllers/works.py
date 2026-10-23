@@ -40,6 +40,7 @@ def get_meta(h) -> None:
             "has_api_key": bool(user.get("api_key")) if user else False,
             "site_origin": user.get("site_origin", "") if user else "",
         },
+        "unlogin_user": config.UNLOGIN_USER,
         "supabase_configured": supabase_client.configured(),
         "storage_backend": "cloud" if config.storage_is_cloud() else "local",
         "remote_configured": config.remote_configured(),

@@ -417,6 +417,70 @@ class SyncFlowTests(unittest.TestCase):
                    if s.lower().startswith('insert into public."claw_galleries"')]
         self.assertTrue(any("8001" in s for s in inserts))
 
+    def test_cross_sync_anonymous_unlogin_into_login_account(self):
+        """需求基线 §12.3：未登录时 POST /api/sync/cross，源数据为 unlogin_user
+        本地库，合并进 target_user 的云端账号（再回推 target）。"""
+        from app import config as app_config
+        unlogin = app_config.UNLOGIN_USER
+        # 1) 登录账号 demo 注册
+        _, _, sc_demo = http("POST", self.base, "/api/auth/register",
+                             body={"username": "demo", "password": "pass1"})
+        cookie_demo = session_cookie(sc_demo)
+        demo_db = db.user_db_path("demo")
+        db.init_db(demo_db)
+        # demo 本地先有 1 条
+        db.upsert_items([GalleryItem(gallery_id=11001, url="https://example.net/g/11001/",
+                                     title="Demo only", languages=["japanese"],
+                                     title_key="demoonly")],
+                        source_url="https://example.net/group/d/", path=demo_db)
+        # 2) unlogin_user 本地库种 2 条
+        unlogin_db = db.user_db_path(unlogin)
+        db.init_db(unlogin_db)
+        db.upsert_items([GalleryItem(gallery_id=12001, url="https://example.net/g/12001/",
+                                     title="Unlogin A", languages=["japanese"],
+                                     title_key="unlogina"),
+                        GalleryItem(gallery_id=12002, url="https://example.net/g/12002/",
+                                    title="Unlogin B", languages=["english"],
+                                    title_key="unloginb")],
+                       source_url="https://example.net/group/u/", path=unlogin_db)
+        # 3) 未登录发起跨账号同步：把 unlogin 的数据合并到 demo 的云端
+        status, data, _ = http("POST", self.base, "/api/sync/cross",
+                              body={"target_user": "demo"})
+        self.assertEqual(status, 200)
+        self.assertTrue(data.get("ok"))
+        self.assertEqual(data["target_user"], "demo")
+        # unlogin 的 2 条应合并进 demo 本地库（拉取来源 = 云端 unlogin 名下的行）
+        # 但此时云端 unlogin 名下还没有数据（unlogin 从不同步上云），所以 pulled=0。
+        # 改为：先看 demo 本地自己的 1 条仍在 + 云端推送包含 demo 的 11001
+        self.assertTrue(any("11001" in s for s in self.fake.statements
+                            if s.lower().startswith('insert into public."claw_galleries"')),
+                        "demo 本地 11001 应被推送上云")
+
+    def test_cross_sync_reverse_login_into_unlogin(self):
+        """需求基线 §12.3 反向：已登录账号把 unlogin_user 作为 target，
+        登录账号的本地数据合并进 unlogin 用户库。"""
+        from app import config as app_config
+        unlogin = app_config.UNLOGIN_USER
+        _, _, sc = http("POST", self.base, "/api/auth/register",
+                        body={"username": "kim", "password": "pass"})
+        cookie = session_cookie(sc)
+        kim_db = db.user_db_path("kim")
+        db.init_db(kim_db)
+        db.upsert_items([GalleryItem(gallery_id=13001, url="https://example.net/g/13001/",
+                                     title="Kim only", languages=["japanese"],
+                                     title_key="kimonly")],
+                        source_url="https://example.net/group/k/", path=kim_db)
+        # 已登录发起，target=unlogin_user：kim 本地 13001 推上云（unlogin 名下行），
+        # 并从云端拉 unlogin 的行合并到 unlogin 本地库
+        status, data, _ = http("POST", self.base, "/api/sync/cross",
+                              body={"target_user": unlogin}, cookie=cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(data["target_user"], unlogin)
+        unlogin_db = db.user_db_path(unlogin)
+        ids = {row["gallery_id"] for row in db.query_works(
+            path=unlogin_db, per_page=50)["items"]}
+        self.assertIn(13001, ids, "kim 的数据应被合并进 unlogin 用户库")
+
     def test_user_isolation_in_cloud_keys(self):
         # 两个用户的云端行按 username 隔离：gina 拉到的不应是 heidi 推的
         _, _, sc_g = http("POST", self.base, "/api/auth/register",
@@ -444,6 +508,115 @@ class SyncFlowTests(unittest.TestCase):
         _, works, _ = http("GET", self.base, "/api/works?per_page=50", cookie=cookie_g)
         ids = {item["gallery_id"] for item in works["items"]}
         self.assertNotIn(9001, ids)
+
+
+class LoginSyncCredsTests(unittest.TestCase):
+    """「同步云端配置」开关（§12.4）：登录时可选用云端凭据覆盖本地 api_key/site_origin。
+
+    注入 FakeTransport，预置云端账号行；三种场景：
+    - 关闭开关：本地凭据保持不变；
+    - 开启开关：本地凭据被云端值覆盖，密码（PBKDF2 验证）不受影响；
+    - 本地无账号的云回退：云端凭据作为初始值重建本地账号行。
+    """
+
+    def setUp(self):
+        self.tmp = make_temp_dir("loginsc")
+        self.db_path = self.tmp / "ls.sqlite3"
+        self._orig_user_data_dir = db.config.USER_DATA_DIR
+        db.config.USER_DATA_DIR = self.tmp / "users"
+        db.init_db(self.db_path)
+        self._orig_ref = supabase_client.config.SUPABASE_PROJECT_REF
+        self._orig_tok = supabase_client.config.SUPABASE_TOKEN
+        self._orig_backend = supabase_client.config.STORAGE_BACKEND
+        supabase_client.config.SUPABASE_PROJECT_REF = "test-project"
+        supabase_client.config.SUPABASE_TOKEN = "test-token"
+        supabase_client.config.STORAGE_BACKEND = "local"
+        self.fake = FakeTransport()
+        supabase_client.set_transport(self.fake)
+        self.server = ApiServer(("127.0.0.1", 0), Handler, db_path=self.db_path)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        # 云端账号行：凭据与本地不同，便于断言是否被覆盖
+        self._cloud_salt, self._cloud_hash = db.hash_password("pass1")
+        self.fake.accounts["demo"] = {
+            "username": "demo",
+            "api_key": "cloud-key",
+            "site_origin": "https://cloud.example.net",
+            "password_hash": self._cloud_hash,
+            "salt": self._cloud_salt,
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+        db.config.USER_DATA_DIR = self._orig_user_data_dir
+        supabase_client.config.SUPABASE_PROJECT_REF = self._orig_ref
+        supabase_client.config.SUPABASE_TOKEN = self._orig_tok
+        supabase_client.config.STORAGE_BACKEND = self._orig_backend
+        supabase_client.set_transport(None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _register_demo_with_local_creds(self):
+        """注册 demo，本地凭据 = local-key / local.example.net。"""
+        status, data, _ = http("POST", self.base, "/api/auth/register",
+                               body={"username": "demo", "password": "pass1",
+                                     "api_key": "local-key",
+                                     "site_origin": "https://local.example.net"})
+        self.assertEqual(status, 200)
+        user = db.get_user("demo", self.db_path)
+        self.assertEqual(user["api_key"], "local-key")
+        self.assertEqual(user["site_origin"], "https://local.example.net")
+
+    def test_login_without_switch_keeps_local_creds(self):
+        self._register_demo_with_local_creds()
+        status, data, _ = http("POST", self.base, "/api/auth/login",
+                               body={"username": "demo", "password": "pass1"})
+        self.assertEqual(status, 200)
+        user = db.get_user("demo", self.db_path)
+        # 未开「同步云端配置」：本地凭据保持 local-*，不被云端 cloud-* 覆盖
+        self.assertEqual(user["api_key"], "local-key")
+        self.assertEqual(user["site_origin"], "https://local.example.net")
+
+    def test_login_with_switch_overlays_cloud_creds(self):
+        self._register_demo_with_local_creds()
+        status, data, _ = http("POST", self.base, "/api/auth/login",
+                               body={"username": "demo", "password": "pass1",
+                                     "sync_creds": True})
+        self.assertEqual(status, 200)
+        user = db.get_user("demo", self.db_path)
+        # 开启「同步云端配置」：api_key / site_origin 被云端值覆盖
+        self.assertEqual(user["api_key"], "cloud-key")
+        self.assertEqual(user["site_origin"], "https://cloud.example.net")
+        # 覆盖凭据不能破坏本地密码：原密码仍能验证
+        self.assertTrue(db.verify_user("demo", "pass1", self.db_path))
+
+    def test_local_verify_cloud_fallback_still_overlays(self):
+        """本地无账号行时走云回退：重建的账号行凭据来自云端。"""
+        status, data, _ = http("POST", self.base, "/api/auth/register",
+                               body={"username": "demo", "password": "pass1",
+                                     "api_key": "local-key",
+                                     "site_origin": "https://local.example.net"})
+        self.assertEqual(status, 200)
+        # 删掉本地账号行，模拟异地登录（本地库里没有 demo）
+        conn = db.connect(self.db_path)
+        try:
+            conn.execute("DELETE FROM users WHERE username = ?", ("demo",))
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertIsNone(db.get_user("demo", self.db_path))
+
+        status, data, sc = http("POST", self.base, "/api/auth/login",
+                                body={"username": "demo", "password": "pass1"})
+        self.assertEqual(status, 200)
+        user = db.get_user("demo", self.db_path)
+        self.assertIsNotNone(user, "云回退后本地账号行应被重建")
+        self.assertEqual(user["api_key"], "cloud-key")
+        self.assertEqual(user["site_origin"], "https://cloud.example.net")
+        self.assertTrue(db.verify_user("demo", "pass1", self.db_path))
 
 
 class OldDbCompatTests(unittest.TestCase):

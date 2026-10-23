@@ -232,6 +232,8 @@ function openAuthModal(tab) {
     btn.classList.toggle("active", btn.dataset.authTab === state.authTab));
   $("authSubmit").textContent = state.authTab === "login" ? "登录" : "注册";
   $("authExtra").hidden = state.authTab !== "register";
+  // 「同步云端配置」开关只对登录有效
+  $("syncCredsWrap").hidden = state.authTab !== "login";
   $("authHint").textContent = state.authTab === "login"
     ? "本地无此用户且已配置云端时，会自动从云端拉取账号验证。"
     : "注册后你的账号、站点域名与 API Key 可在云端跨设备同步。";
@@ -239,6 +241,7 @@ function openAuthModal(tab) {
   $("authPassword").value = "";
   $("authSite").value = "";
   $("authKey").value = "";
+  $("syncCredsCheck").checked = false;
   $("authUsername").focus();
 }
 
@@ -250,6 +253,9 @@ async function submitAuth() {
   if (!username || !password) { toast("请填写用户名和密码", "error"); return; }
   const body = { username, password };
   const path = state.authTab === "login" ? "/api/auth/login" : "/api/auth/register";
+  if (state.authTab === "login") {
+    body.sync_creds = $("syncCredsCheck").checked;
+  }
   if (state.authTab === "register") {
     body.site_origin = $("authSite").value.trim();
     body.api_key = $("authKey").value.trim();
@@ -304,11 +310,28 @@ async function logout() {
 }
 
 function openSettingsModal() {
-  if (!state.user) { openAuthModal("login"); return; }
   $("settingsModal").hidden = false;
+  const crossRow = document.getElementById("crossSyncRow");
+  if (!state.user) {
+    // 未登录：只允许跨账号同步区（源=unlogin_user），其余设置项置灰
+    $("settingsUsername").textContent = "未登录（匿名 = " + stateMetaUnloginUser() + "）";
+    $("settingsSite").disabled = true;
+    $("settingsKey").disabled = true;
+    $("settingsSave").disabled = true;
+    const syncRow = document.getElementById("syncRow");
+    if (syncRow) syncRow.style.display = "none";
+    document.getElementById("syncResult").hidden = true;
+    if (crossRow) crossRow.style.display = "";
+    renderCrossSyncHint();
+    loadSyncStatus();
+    return;
+  }
   $("settingsUsername").textContent = state.user.username;
   $("settingsSite").value = state.user.site_origin || "";
   $("settingsKey").value = "";
+  $("settingsSite").disabled = false;
+  $("settingsKey").disabled = false;
+  $("settingsSave").disabled = false;
   $("syncResult").textContent = "";
   const cloudMode = state.meta && state.meta.storage_backend === "cloud";
   // 云模式：数据直连云端，无需同步；隐藏同步区块并提示
@@ -319,10 +342,57 @@ function openSettingsModal() {
     $("syncStatusText").textContent = "云模式：数据直连云端，无需同步。";
     $("pullBtn").disabled = true;
     $("pushBtn").disabled = true;
+    if (crossRow) crossRow.style.display = "none";
   } else {
     const syncRow = document.getElementById("syncRow");
     if (syncRow) syncRow.style.display = "";
+    if (crossRow) crossRow.style.display = "";
+    renderCrossSyncHint();
     loadSyncStatus();
+  }
+}
+
+function stateMetaUnloginUser() {
+  return (state.meta && state.meta.unlogin_user) || "unlogin_user";
+}
+
+function renderCrossSyncHint() {
+  const hint = $("crossSyncHint");
+  if (!hint) return;
+  if (state.user) {
+    hint.textContent = "已登录：源数据为当前账号（" + esc(state.user.username) +
+      "），目标可填其他账号或 " + esc(stateMetaUnloginUser()) + "。";
+  } else {
+    hint.textContent = "未登录：源数据为 " + esc(stateMetaUnloginUser()) +
+      "（匿名数据），目标账号填已登录的账号名即可。";
+  }
+}
+
+async function doCrossSync() {
+  const target = $("crossTarget").value.trim();
+  const source = $("crossSource").value.trim();
+  $("crossBtn").disabled = true;
+  $("crossSyncResult").textContent = "正在跨账号同步…";
+  try {
+    const data = await api("/api/sync/cross", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target_user: target, source_user: source }),
+    });
+    const pulled = data.pulled || {};
+    const pushed = data.pushed || {};
+    const local = data.local || {};
+    $("crossSyncResult").textContent =
+      "跨账号同步完成（目标 " + esc(data.target_user || target) + "）：作品 "
+      + (pulled.galleries || 0) + " / 批次 " + (pulled.runs || 0)
+      + " · 本地 作品 " + (local.galleries || 0) + " / 批次 " + (local.runs || 0);
+    toast("跨账号同步完成", "ok");
+    await reloadAll();
+  } catch (error) {
+    $("crossSyncResult").textContent = "跨账号同步失败：" + error.message;
+    toast(error.message, "error");
+  } finally {
+    $("crossBtn").disabled = false;
   }
 }
 
@@ -368,10 +438,12 @@ async function loadSyncStatus() {
     const enabled = data.configured;
     $("pullBtn").disabled = !enabled;
     $("pushBtn").disabled = !enabled;
+    $("crossBtn").disabled = !enabled;
   } catch (error) {
     $("syncStatusText").textContent = "无法读取云端状态：" + error.message;
     $("pullBtn").disabled = true;
     $("pushBtn").disabled = true;
+    $("crossBtn").disabled = true;
   }
 }
 
@@ -1294,6 +1366,9 @@ function bindEvents() {
   $("settingsSave").addEventListener("click", saveSettings);
   $("pullBtn").addEventListener("click", () => doSync("pull"));
   $("pushBtn").addEventListener("click", () => doSync("push"));
+  $("crossBtn").addEventListener("click", doCrossSync);
+  $("crossTarget").addEventListener("keydown", (event) => { if (event.key === "Enter") doCrossSync(); });
+  $("crossSource").addEventListener("keydown", (event) => { if (event.key === "Enter") doCrossSync(); });
   // 点弹窗遮罩关闭
   $("authModal").addEventListener("click", (event) => { if (event.target.id === "authModal") closeAuthModal(); });
   $("settingsModal").addEventListener("click", (event) => { if (event.target.id === "settingsModal") closeSettingsModal(); });

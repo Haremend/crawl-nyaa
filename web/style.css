@@ -433,3 +433,9 @@ img.thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
 .modal-sep { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
 .sync-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .sync-row strong { font-size: 15px; }
+#crossSyncRow { align-items: stretch; }
+#crossSyncRow > div:first-child { display: flex; flex-direction: column; gap: 8px; }
+.cross-field { min-width: 0; flex: 1 1 240px; }
+.cross-field input { padding: 7px 9px; border: 1px solid var(--border-strong);
+  border-radius: 6px; font-size: 14px; background: #fff; color: var(--text); }
+.cross-field input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }

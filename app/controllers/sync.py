@@ -29,6 +29,23 @@ def post_sync_push(h) -> None:
     _respond(h, sync_service.push(user), "推送失败")
 
 
+def post_sync_cross(h) -> None:
+    """跨账号同步（需求基线 §12.3）：把 unlogin_user（或源账号）的数据合并进目标账号。
+
+    未登录：允许调用，数据源固定为 unlogin_user 库；target_user 缺省 = unlogin_user
+    （即常规同步），传已登录账号名则合并到该账号。
+    已登录：数据源为登录账号库；target_user 缺省 = 当前登录账号。
+    请求体 {target_user, source_user}，source_user 可选（第三方账号的云端数据一并并入）。
+    """
+    user = h._current_user()   # 允许未登录（匿名 → unlogin_user）
+    payload = h._read_json() or {}
+    result = sync_service.cross_sync(
+        user,
+        target_user=str(payload.get("target_user") or ""),
+        source_user=str(payload.get("source_user") or ""))
+    _respond(h, result, "跨账号同步失败")
+
+
 def _respond(h, result: dict, default_error: str) -> None:
     if not result.get("ok") and result.get("status"):
         h._error(result.get("error", default_error), result["status"])
