@@ -70,6 +70,8 @@ def query_works(username: str, filters: dict) -> dict:
         items = [it for it in items if it["want_download"]]
     if filters.get("downloaded_only"):
         items = [it for it in items if it["downloaded"]]
+    if filters.get("pending_only"):
+        items = [it for it in items if not it["want_download"] and not it["downloaded"]]
     if filters.get("site_favorites_only"):
         items = [it for it in items if it["site_favorite"]]
     if filters.get("batch_id"):

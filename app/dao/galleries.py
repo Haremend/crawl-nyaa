@@ -408,6 +408,7 @@ def query_works(
     uncensored: bool = False,
     want_download_only: bool = False,
     downloaded_only: bool = False,
+    pending_only: bool = False,
     site_favorites_only: bool = False,
     batch_id: int | None = None,
     path: str | Path | None = None,
@@ -436,6 +437,9 @@ def query_works(
         items = [item for item in items if item["want_download"]]
     if downloaded_only:
         items = [item for item in items if item["downloaded"]]
+    if pending_only:
+        # 「未下载且未待下载」：组内任一变体打了待下载/已下载都算已处理，排除
+        items = [item for item in items if not item["want_download"] and not item["downloaded"]]
     if site_favorites_only:
         items = [item for item in items if item["site_favorite"]]
     if batch_id:

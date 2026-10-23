@@ -63,6 +63,21 @@ class WantDownloadTests(unittest.TestCase):
         db.set_downloaded([1002], False, self.db_path)
         self.assertEqual(db.query_works(path=self.db_path, per_page=50, downloaded_only=True)["total"], 0)
 
+    def test_filter_pending_only(self):
+        """「未下载且未待下载」：组内任一变体打了 want/downloaded 都排除。"""
+        db.set_want_download([1001], True, self.db_path)
+        db.set_downloaded([1002], True, self.db_path)
+        data = db.query_works(path=self.db_path, per_page=50, pending_only=True)
+        self.assertEqual(data["total"], 0, "两件都打了标记，全部被排除")
+        db.set_want_download([1001], False, self.db_path)
+        data = db.query_works(path=self.db_path, per_page=50, pending_only=True)
+        self.assertEqual(data["total"], 1)
+        self.assertEqual(data["items"][0]["gallery_id"], 1001, "只剩未下载且未待下载的 1001")
+        # 反向：两个都清空 → 全部命中
+        db.set_downloaded([1002], False, self.db_path)
+        data = db.query_works(path=self.db_path, per_page=50, pending_only=True)
+        self.assertEqual(data["total"], 2)
+
     def test_stats_counts(self):
         db.set_want_download([1001], True, self.db_path)
         db.set_downloaded([1002], True, self.db_path)

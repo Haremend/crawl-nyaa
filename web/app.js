@@ -14,6 +14,7 @@ const state = {
   uncensored: false,
   wantOnly: false,
   downloadedOnly: false,
+  pendingOnly: false,
   sort: "priority",
   page: 1,
   perPage: 48,
@@ -524,6 +525,7 @@ function buildParams(includePaging = true) {
   if (state.uncensored) params.set("uncensored", "1");
   if (state.wantOnly) params.set("want", "1");
   if (state.downloadedOnly) params.set("downloaded", "1");
+  if (state.pendingOnly) params.set("pending", "1");
   if (state.batchId) params.set("batch", state.batchId);
   params.set("sort", state.sort);
   if (includePaging) {
@@ -747,8 +749,9 @@ function cardHtml(item) {
   const langBadges = (item.languages || []).map((lang) =>
     '<span class="badge lang-' + esc(lang.key) + '">' + esc(lang.label) + "</span>").join("");
   const tagList = item.tags || [];
-  const tagBadges = tagList.slice(0, 8).map((tag) => '<span class="badge tag">' + esc(tag) + "</span>").join("");
-  const more = tagList.length > 8 ? '<span class="badge more">+' + (tagList.length - 8) + "</span>" : "";
+  const tagBadges = tagList.map((tag) =>
+    '<button class="badge tag tag-btn" data-tag="' + esc(tag) + '" title="点击按此标签搜索">'
+    + esc(tag) + "</button>").join("");
 
   const variants = item.variant_count > 1
     ? '<details class="variants-list"><summary>查看 ' + item.variant_count + ' 个版本</summary><ul>'
@@ -778,7 +781,7 @@ function cardHtml(item) {
     + esc(item.title) + "</a></h3>"
     + originalLine
     + '<div class="badges">' + uncensoredBadge + doneBadge + siteBadge + variantBadge + langBadges + "</div>"
-    + '<div class="badges">' + tagBadges + more + "</div>"
+    + '<div class="badges">' + tagBadges + "</div>"
     + '<div class="card-actions">' + wantBtn + dlBtn + hideBtn + "</div>"
     + variants
     + '<div class="card-meta"><span>#' + esc(item.gallery_id) + "</span><span>" + esc(factLine) + "</span></div>"
@@ -1460,6 +1463,7 @@ function bindEvents() {
   $("dedupeCheck").addEventListener("change", (e) => { state.dedupe = e.target.checked; reload(); });
   $("wantCheck").addEventListener("change", (e) => { state.wantOnly = e.target.checked; reload(); });
   $("downloadedCheck").addEventListener("change", (e) => { state.downloadedOnly = e.target.checked; reload(); });
+  $("pendingCheck").addEventListener("change", (e) => { state.pendingOnly = e.target.checked; reload(); });
   $("uncensoredCheck").addEventListener("change", (e) => { state.uncensored = e.target.checked; reload(); });
   $("sortSelect").addEventListener("change", (e) => { state.sort = e.target.value; reload(); });
   $("perPageSelect").addEventListener("change", (e) => { state.perPage = Number(e.target.value) || 48; reload(); });
@@ -1505,6 +1509,20 @@ function bindEvents() {
       const was = markBtn.dataset.done === "1";
       try { await markDownloaded([id], !was); toast(was ? "已取消已下载标记" : "已标记已下载", "ok"); await reloadAll(); }
       catch (error) { toast(error.message, "error"); }
+      return;
+    }
+    // 卡片 tag：点击加入搜索条件并立即搜索
+    const tagBtn = event.target.closest("button.tag-btn");
+    if (tagBtn) {
+      const tag = tagBtn.dataset.tag;
+      if (!tag) return;
+      $("searchInput").value = tag;
+      state.q = tag;
+      state.page = 1;
+      if (state.tab !== "library") await switchTab("library");
+      loadWorks().catch((error) => toast(error.message, "error"));
+      toast("已按标签「" + tag + "」搜索");
+      return;
     }
     const hideBtn = event.target.closest("button.hide-btn");
     if (hideBtn) {

@@ -40,9 +40,9 @@ def list_works(filters: dict, user: dict | None, user_db: str | None = None) -> 
     """/api/works 的 cloud↔local 分叉 + decorate。
 
     filters 由 controller 从 query 解析（q/languages/dedupe_title/sort/page/
-    per_page/uncensored/want_download_only/downloaded_only/site_favorites_only/
-    batch_id）。返回 shape 与 _handle_works 的 _json(data) 一致（controller
-    最后补 data["ok"]=True）。
+    per_page/uncensored/want_download_only/downloaded_only/pending_only/
+    site_favorites_only/batch_id）。返回 shape 与 _handle_works 的 _json(data)
+    一致（controller 最后补 data["ok"]=True）。
 
     云模式下无 username / Supabase 失败时返回带 error+status 的结构（与原
     handler 的 401/502 兜底同 shape，由 controller 映射到 _error）。
@@ -62,6 +62,7 @@ def list_works(filters: dict, user: dict | None, user_db: str | None = None) -> 
             uncensored=filters.get("uncensored", False),
             want_download_only=filters.get("want_download_only", False),
             downloaded_only=filters.get("downloaded_only", False),
+            pending_only=filters.get("pending_only", False),
             site_favorites_only=filters.get("site_favorites_only", False),
             batch_id=filters.get("batch_id"),
             path=user_db,

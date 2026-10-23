@@ -262,8 +262,8 @@ def normalize_works_filters(payload: dict | None) -> dict:
     """POST body 里的 filters（URLSearchParams 转对象）→ works filters dict。
 
     与 GET /api/works 的 query 参数同语义（q/lang/dedupe/sort/uncensored/
-    want/downloaded/site_favorites/batch），保证「下载当前筛选结果」与页面
-    当前列表条件完全一致。
+    want/downloaded/pending/site_favorites/batch），保证「下载当前筛选结果」
+    与页面当前列表条件完全一致。
     """
     payload = payload or {}
 
@@ -282,6 +282,7 @@ def normalize_works_filters(payload: dict | None) -> dict:
         "uncensored": as_list(payload.get("uncensored", "0")),
         "want": as_list(payload.get("want", "0")),
         "downloaded": as_list(payload.get("downloaded", "0")),
+        "pending": as_list(payload.get("pending", "0")),
         "site_favorites": as_list(payload.get("site_favorites", "0")),
         "batch": as_list(payload.get("batch")),
     }

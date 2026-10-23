@@ -48,6 +48,7 @@ def parse_works_filters(query: dict) -> dict:
         "uncensored": _bool_param(query, "uncensored"),
         "want_download_only": _bool_param(query, "want"),
         "downloaded_only": _bool_param(query, "downloaded"),
+        "pending_only": _bool_param(query, "pending"),
         "site_favorites_only": _bool_param(query, "site_favorites"),
         "batch_id": int_param(query, "batch", 0, 0, 10 ** 13) or None,
     }

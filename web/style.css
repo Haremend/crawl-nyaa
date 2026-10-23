@@ -221,6 +221,12 @@ img.thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
 .badge.lang-korean { border-color: #a6dcb8; color: #1a7f4b; background: #f1fbf5; }
 .badge.tag { background: #ffffff; }
 .badge.more { border-style: dashed; }
+.badge.tag-btn {
+  cursor: pointer; font-family: inherit; font-weight: inherit; line-height: inherit;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+.badge.tag-btn:hover { background: #f0f6ff; border-color: #a9c7f0; color: #1f5fbd; }
+.badge.tag-btn:active { background: #dbe9ff; }
 .variants-list { font-size: 14px; color: var(--muted); }
 .variants-list summary { cursor: pointer; color: #5f43c9; font-weight: 600; }
 .variants-list ul { margin: 7px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 5px; }
