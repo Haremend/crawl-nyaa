@@ -227,19 +227,8 @@ class RemoteSyncTests(_RemoteBase, unittest.TestCase):
         pam_db = db.user_db_path("pam")
         db.init_db(pam_db)
         # 远端 pull 返回一行
-        self.fake.pull_rows["pam"] = {"galleries": [{
-            "gallery_id": 8001, "media_id": 1, "title": "Remote work", "title_pretty": "",
-            "title_original": "", "title_key": "remote", "original_key": "",
-            "url": "https://example.net/g/8001/", "thumbnail": "", "languages": "[]",
-            "primary_language": "japanese", "tags": "[]", "artists": "[]", "groups": "[]",
-            "parodies": "[]", "characters": "[]", "categories": "[]", "cover_file": "",
-            "cover_fetched_at": "", "scanlator": "", "uncensored": 0, "want_download": 0,
-            "downloaded": 0, "downloaded_at": "", "hidden": 0, "site_favorite": 0,
-            "from_scrape": 1, "batch_id": 0, "num_pages": None, "num_favorites": None,
-            "upload_date": "", "source_url": "", "detail_fetched_at": "",
-            "first_seen": "2026-01-01T00:00:00+00:00",
-            "last_seen": "2026-01-02T00:00:00+00:00",
-        }], "runs": []}
+        self.fake.pull_rows["pam"] = {"galleries": [_cloud_gallery_row(8001)],
+                                      "runs": []}
         status, data, _ = http("POST", self.base, "/api/sync/pull", body={}, cookie=cookie)
         self.assertEqual(status, 200)
         self.assertTrue(data.get("via_remote"))
@@ -248,6 +237,50 @@ class RemoteSyncTests(_RemoteBase, unittest.TestCase):
         status, works, _ = http("GET", self.base, "/api/works?per_page=50", cookie=cookie)
         ids = {item["gallery_id"] for item in works["items"]}
         self.assertIn(8001, ids)
+
+    def test_login_auto_pulls_remote_data(self):
+        """登录成功后自动拉取一次远端数据（§12.5）；离线即可查看。
+
+        需求基线 §12.5：登录后自动 pull 远端→本地，best-effort 不阻断登录；
+        推送仍由用户手动点【数据同步】菜单触发。
+        """
+        _, _, sc = http("POST", self.base, "/api/auth/register",
+                         body={"username": "mel", "password": "pass"})
+        cookie = session_cookie(sc)
+        db.init_db(db.user_db_path("mel"))
+        # 退出后重新登录，模拟「异地登录取回数据」
+        http("POST", self.base, "/api/auth/logout", body={}, cookie=cookie)
+        # 预置远端 mel 有一行数据
+        self.fake.pull_rows["mel"] = {"galleries": [_cloud_gallery_row(7001)],
+                                      "runs": []}
+        self.fake.pull_calls = []
+        status, data, sc2 = http("POST", self.base, "/api/auth/login",
+                                  body={"username": "mel", "password": "pass"})
+        self.assertEqual(status, 200)
+        # 登录触发了远端拉取
+        self.assertEqual(self.fake.pull_calls, ["mel"])
+        # 响应带回拉取条数
+        self.assertEqual(data["pulled"]["galleries"], 1)
+        # 离线查看：本地库已有 7001
+        cookie2 = session_cookie(sc2)
+        status, works, _ = http("GET", self.base, "/api/works?per_page=50",
+                                 cookie=cookie2)
+        self.assertIn(7001, {i["gallery_id"] for i in works["items"]})
+
+    def test_login_auto_pull_failure_does_not_block(self):
+        """远端拉取失败不阻断登录（best-effort）。"""
+        _, _, sc = http("POST", self.base, "/api/auth/register",
+                         body={"username": "ned", "password": "pass"})
+        cookie = session_cookie(sc)
+        db.init_db(db.user_db_path("ned"))
+        http("POST", self.base, "/api/auth/logout", body={}, cookie=cookie)
+        # 远端拉取抛错
+        self.fake.fail = True
+        status, data, _ = http("POST", self.base, "/api/auth/login",
+                                body={"username": "ned", "password": "pass"})
+        self.assertEqual(status, 200)
+        # 失败时 pulled 为空，但登录仍成功
+        self.assertEqual(data.get("pulled"), {})
 
     def test_push_via_remote_sends_local_rows(self):
         _, _, sc = http("POST", self.base, "/api/auth/register",
@@ -277,6 +310,23 @@ def _make_item(gid, title="Work", language="japanese"):
     from app.parser import GalleryItem
     return GalleryItem(gallery_id=gid, url=f"https://example.net/g/{gid}/",
                        title=title, languages=[language])
+
+
+def _cloud_gallery_row(gid):
+    """远端 galleries 行（cloud_merge 期望的完整列字典）。"""
+    return {
+        "gallery_id": gid, "media_id": 1, "title": "Remote work", "title_pretty": "",
+        "title_original": "", "title_key": "remote", "original_key": "",
+        "url": f"https://example.net/g/{gid}/", "thumbnail": "", "languages": "[]",
+        "primary_language": "japanese", "tags": "[]", "artists": "[]", "groups": "[]",
+        "parodies": "[]", "characters": "[]", "categories": "[]", "cover_file": "",
+        "cover_fetched_at": "", "scanlator": "", "uncensored": 0, "want_download": 0,
+        "downloaded": 0, "downloaded_at": "", "hidden": 0, "site_favorite": 0,
+        "from_scrape": 1, "batch_id": 0, "num_pages": None, "num_favorites": None,
+        "upload_date": "", "source_url": "", "detail_fetched_at": "",
+        "first_seen": "2026-01-01T00:00:00+00:00",
+        "last_seen": "2026-01-02T00:00:00+00:00",
+    }
 
 
 # ============================================================

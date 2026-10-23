@@ -72,6 +72,7 @@ def post_login(h) -> None:
         h._error(result.get("error", "用户名或密码错误"), result.get("status", 401))
         return
     h._json({"ok": True, "username": result["username"],
+             "pulled": result.get("pulled", {}),
              "merged_from_unlogin": result.get("merged_from_unlogin", {})},
             headers={"Set-Cookie": h._session_cookie_header(
                 result["session_token"], max_age=result["max_age"])})

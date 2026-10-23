@@ -272,7 +272,11 @@ async function submitAuth() {
     const mergeNote = merged && (merged.galleries || 0) > 0
       ? "，已并入 " + merged.galleries + " 条匿名期间的作品" : "";
     if (state.authTab === "login") {
-      toast("登录成功" + mergeNote, "ok");
+      // 登录会自动拉取一次远端数据到本地库（§12.5），pulled 为本次新增/合并条数
+      const pulled = (data && data.pulled) || {};
+      const pullNote = (pulled.galleries || 0) > 0
+        ? "，已同步 " + pulled.galleries + " 条远程作品" : "";
+      toast("登录成功" + mergeNote + pullNote, "ok");
     } else {
       // 注册 toast 区分：是否真正写进了云端
       if (data && data.cloud_error && !data.cloud_registered) {

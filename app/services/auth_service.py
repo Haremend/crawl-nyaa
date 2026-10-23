@@ -108,6 +108,23 @@ def _merge_unlogin(username: str) -> dict:
         return {}
 
 
+def _auto_pull(username: str) -> dict:
+    """登录成功后自动拉远端数据合并进本地库（§12.5，登录即拉）。
+
+    幂等合并：已存在的 gallery_id 跳过、last_seen 新者胜，重复登录不产生
+    脏数据。best-effort：云端未配置/拉取失败只记日志，不阻断登录；
+    云模式下 pull 是 no-op（数据本就在云端）。
+    """
+    try:
+        from app.services import sync_service
+        result = sync_service.pull({"username": username})
+        if result.get("ok"):
+            return result.get("pulled", {})
+    except Exception as exc:  # 防御性兜底
+        cloud_log(f"登录自动拉取失败 user={username}: {exc}")
+    return {}
+
+
 def login(username: str, password: str, db_path, sync_creds: bool = False) -> dict:
     """登录：本地 verify 优先；失败且（remote 或 supabase 可用）时走云回退。
 
@@ -135,11 +152,13 @@ def login(username: str, password: str, db_path, sync_creds: bool = False) -> di
         _overlay_remote_creds(username, db_path)
     # §12.3：登录成功即把未登录期间（unlogin_user 库）的数据并入本账号
     merged = _merge_unlogin(username)
+    # §12.5：登录后自动拉远端数据合并进本地库（best-effort，失败不阻断登录）
+    auto_pulled = _auto_pull(username)
     token = db.create_session(username, path=db_path)
     max_age = config.SESSION_TTL_HOURS * 3600
     return {"ok": True, "username": username, "session_token": token,
             "max_age": max_age, "creds_synced": bool(sync_creds) or cloud_used,
-            "merged_from_unlogin": merged}
+            "merged_from_unlogin": merged, "pulled": auto_pulled}
 
 
 def _cloud_login_fallback(username: str, password: str, db_path) -> bool:
