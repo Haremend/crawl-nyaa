@@ -417,23 +417,15 @@ class SyncFlowTests(unittest.TestCase):
                    if s.lower().startswith('insert into public."claw_galleries"')]
         self.assertTrue(any("8001" in s for s in inserts))
 
-    def test_cross_sync_anonymous_unlogin_into_login_account(self):
-        """需求基线 §12.3：未登录时 POST /api/sync/cross，源数据为 unlogin_user
-        本地库，合并进 target_user 的云端账号（再回推 target）。"""
+    def test_login_auto_merges_unlogin_data(self):
+        """需求基线 §12.3：登录成功自动把 unlogin_user 本地数据并入登录账号库。
+
+        场景：未登录期间攒了 2 条作品 → 注册/登录 demo → demo 本地库自动出现
+        这 2 条（无需任何手动同步入口），登录响应带 merged_from_unlogin 数量。
+        """
         from app import config as app_config
         unlogin = app_config.UNLOGIN_USER
-        # 1) 登录账号 demo 注册
-        _, _, sc_demo = http("POST", self.base, "/api/auth/register",
-                             body={"username": "demo", "password": "pass1"})
-        cookie_demo = session_cookie(sc_demo)
-        demo_db = db.user_db_path("demo")
-        db.init_db(demo_db)
-        # demo 本地先有 1 条
-        db.upsert_items([GalleryItem(gallery_id=11001, url="https://example.net/g/11001/",
-                                     title="Demo only", languages=["japanese"],
-                                     title_key="demoonly")],
-                        source_url="https://example.net/group/d/", path=demo_db)
-        # 2) unlogin_user 本地库种 2 条
+        # 1) 未登录期间 unlogin_user 库有 2 条
         unlogin_db = db.user_db_path(unlogin)
         db.init_db(unlogin_db)
         db.upsert_items([GalleryItem(gallery_id=12001, url="https://example.net/g/12001/",
@@ -443,43 +435,26 @@ class SyncFlowTests(unittest.TestCase):
                                     title="Unlogin B", languages=["english"],
                                     title_key="unloginb")],
                        source_url="https://example.net/group/u/", path=unlogin_db)
-        # 3) 未登录发起跨账号同步：把 unlogin 的数据合并到 demo 的云端
-        status, data, _ = http("POST", self.base, "/api/sync/cross",
-                              body={"target_user": "demo"})
+        # 2) 注册 demo（注册后自动建会话；登录路径同理）
+        status, data, _ = http("POST", self.base, "/api/auth/register",
+                              body={"username": "demo", "password": "pass1"})
         self.assertEqual(status, 200)
-        self.assertTrue(data.get("ok"))
-        self.assertEqual(data["target_user"], "demo")
-        # unlogin 的 2 条应合并进 demo 本地库（拉取来源 = 云端 unlogin 名下的行）
-        # 但此时云端 unlogin 名下还没有数据（unlogin 从不同步上云），所以 pulled=0。
-        # 改为：先看 demo 本地自己的 1 条仍在 + 云端推送包含 demo 的 11001
-        self.assertTrue(any("11001" in s for s in self.fake.statements
-                            if s.lower().startswith('insert into public."claw_galleries"')),
-                        "demo 本地 11001 应被推送上云")
-
-    def test_cross_sync_reverse_login_into_unlogin(self):
-        """需求基线 §12.3 反向：已登录账号把 unlogin_user 作为 target，
-        登录账号的本地数据合并进 unlogin 用户库。"""
-        from app import config as app_config
-        unlogin = app_config.UNLOGIN_USER
-        _, _, sc = http("POST", self.base, "/api/auth/register",
-                        body={"username": "kim", "password": "pass"})
-        cookie = session_cookie(sc)
-        kim_db = db.user_db_path("kim")
-        db.init_db(kim_db)
-        db.upsert_items([GalleryItem(gallery_id=13001, url="https://example.net/g/13001/",
-                                     title="Kim only", languages=["japanese"],
-                                     title_key="kimonly")],
-                        source_url="https://example.net/group/k/", path=kim_db)
-        # 已登录发起，target=unlogin_user：kim 本地 13001 推上云（unlogin 名下行），
-        # 并从云端拉 unlogin 的行合并到 unlogin 本地库
-        status, data, _ = http("POST", self.base, "/api/sync/cross",
-                              body={"target_user": unlogin}, cookie=cookie)
-        self.assertEqual(status, 200)
-        self.assertEqual(data["target_user"], unlogin)
-        unlogin_db = db.user_db_path(unlogin)
+        # 3) 注册/登录会把 unlogin 数据并入 demo 本地库
+        demo_db = db.user_db_path("demo")
         ids = {row["gallery_id"] for row in db.query_works(
-            path=unlogin_db, per_page=50)["items"]}
-        self.assertIn(13001, ids, "kim 的数据应被合并进 unlogin 用户库")
+            path=demo_db, per_page=50)["items"]}
+        self.assertIn(12001, ids, "unlogin_user 的 12001 应被并入 demo 库")
+        self.assertIn(12002, ids, "unlogin_user 的 12002 应被并入 demo 库")
+
+        # 4) 登录（本地验证通过）同样触发并入，响应带 merged_from_unlogin
+        status, data, _ = http("POST", self.base, "/api/auth/login",
+                              body={"username": "demo", "password": "pass1"})
+        self.assertEqual(status, 200)
+        self.assertIn("merged_from_unlogin", data, "登录响应应带并入数量")
+        # 幂等：重复登录不会报错，并入计数为 0（已存在一律跳过）
+        again = data["merged_from_unlogin"]
+        self.assertEqual(again.get("galleries"), 0,
+                         "重复登录不应重复并入（已存在 gallery_id 一律跳过）")
 
     def test_user_isolation_in_cloud_keys(self):
         # 两个用户的云端行按 username 隔离：gina 拉到的不应是 heidi 推的

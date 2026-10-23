@@ -24,21 +24,15 @@ def remote_base_masked() -> str:
 
 def status() -> dict:
     """同步可用性状态（controller 负责 _json）。"""
-    base = {
-        "ok": True,
-        "unlogin_user": config.UNLOGIN_USER,
-    }
     if config.storage_is_cloud():
-        base.update({"configured": True, "available": True,
-                     "cloud_mode": True,
-                     "message": "云模式：数据直连云端，无需同步"})
-        return base
+        return {"ok": True, "configured": True, "available": True,
+                "cloud_mode": True,
+                "message": "云模式：数据直连云端，无需同步"}
     if config.remote_configured():
-        base.update({"configured": True, "available": True,
-                     "cloud_mode": False, "via_remote": True,
-                     "remote_base_masked": remote_base_masked(),
-                     "message": "已通过远程 VPS 同步（本机无需 Supabase 凭据）。"})
-        return base
+        return {"ok": True, "configured": True, "available": True,
+                "cloud_mode": False, "via_remote": True,
+                "remote_base_masked": remote_base_masked(),
+                "message": "已通过远程 VPS 同步（本机无需 Supabase 凭据）。"}
     configured = supabase_client.configured()
     available = False
     if configured:
@@ -46,113 +40,61 @@ def status() -> dict:
             available = supabase_client.tables_exist()
         except supabase_client.SupabaseError:
             available = False
-    base.update({"configured": configured, "available": available,
-                 "cloud_mode": False, "via_remote": False,
-                 "remote_base_masked": remote_base_masked()})
-    return base
+    return {"ok": True, "configured": configured, "available": available,
+            "cloud_mode": False, "via_remote": False,
+            "remote_base_masked": remote_base_masked()}
 
 
-def _cross_merge(target_user: str, target_db: str | Path,
-                 source_db: str | Path, extra_source: str = "") -> dict:
-    """跨账号合并（需求基线 §12.3）：以 target 的本地库为合并落点。
+def merge_unlogin_into(username: str) -> dict:
+    """登录时把内置匿名账号 unlogin_user 的本地数据并入登录账号库（§12.3）。
 
-    步骤：①拉 target 的云端数据 → 合并进 target 本地库；
-         ②若 source_db ≠ target_db，把 source 本地库的行按同一合并规则
-           （cloud_merge：标记列 1 覆盖 0、last_seen 新者胜）并入 target 本地；
-         ③（可选）extra_source 是第三方账号名时，拉其云端行也并入 target 本地；
-         ④把 target 本地（已合并）推回 target 的云端账号。
-    合并全程复用 db.upsert_gallery_rows_from_cloud / upsert_run_rows_from_cloud，
-    不新增规则。source_db == target_db 时退化为常规单账号同步（拉→推自己）。
+    方向固定：unlogin_user → 登录账号（单向，不反向）；按现有合并规则
+    （cloud_merge：标记列 1 覆盖 0、last_seen 新者胜）执行，全程复用
+    db.upsert_gallery_rows_from_cloud / upsert_run_rows_from_cloud，不新增规则。
+    unlogin_user 本地库保留原数据（幂等：重复登录时已存在的 gallery_id
+    一律跳过，不会重复合并出脏数据）。
+
+    返回 {galleries, runs} 为**真实新增**条数（合并前目标库中不存在的行），
+    供登录响应回显「已并入 N 条匿名数据」；重复登录时新增数为 0。
     """
+    unlogin_db = db.user_db_path(config.UNLOGIN_USER)
+    target_db = db.user_db_path(username)
+    db.init_db(unlogin_db)
+    db.init_db(target_db)
     limit = config.SUPABASE_SYNC_MAX_ROWS
 
-    def _merge_rows(g_rows, r_rows, into_db):
-        g = db.upsert_gallery_rows_from_cloud(g_rows or [], into_db)
-        r = db.upsert_run_rows_from_cloud(r_rows or [], into_db)
-        return g, r
+    def _new_count(existing_ids: set, new_ids: list) -> int:
+        return sum(1 for gid in new_ids if gid not in existing_ids)
 
-    if config.remote_configured():
-        client = remote_client.get_client()
+    gallery_rows = db.all_gallery_rows(unlogin_db)[:limit]
+    run_rows = db.all_run_rows(unlogin_db)[:limit]
+
+    def _existing(table: str, key: str, values: list) -> set:
+        values = [v for v in values if v is not None]
+        if not values:
+            return set()
+        conn = db.connect(target_db)
         try:
-            res = client.pull(target_user)
-            pulled_g, pulled_r = _merge_rows(res.get("galleries"), res.get("runs"), target_db)
-        except remote_client.RemoteError as exc:
-            return {"ok": False, "error": f"拉取 {target_user} 云端数据失败：{exc}",
-                    "status": 502}
-        merged_g = merged_r = 0
-        if Path(source_db) != Path(target_db):
-            merged_g, merged_r = _merge_rows(
-                db.all_gallery_rows(source_db)[:limit],
-                db.all_run_rows(source_db)[:limit], target_db)
-        if extra_source and extra_source != target_user:
-            try:
-                ex = client.pull(extra_source)
-                _merge_rows(ex.get("galleries"), ex.get("runs"), target_db)
-            except remote_client.RemoteError:
-                pass  # 第三方源拉取失败不阻断主流程
-        try:
-            res2 = client.push(
-                target_user,
-                db.all_gallery_rows(target_db)[:limit],
-                db.all_run_rows(target_db)[:limit])
-        except remote_client.RemoteError as exc:
-            return {"ok": False, "error": f"推送 {target_user} 云端数据失败：{exc}",
-                    "status": 502}
-        return {"ok": True, "username": target_user, "target_user": target_user,
-                "source_user": extra_source or "",
-                "pulled": {"galleries": pulled_g, "runs": pulled_r},
-                "merged": {"galleries": merged_g, "runs": merged_r},
-                "pushed": res2.get("pushed", {}),
-                "cloud": res.get("counts", {}),
-                "local": {"galleries": len(db.all_gallery_rows(target_db)),
-                           "runs": len(db.all_run_rows(target_db))},
-                "via_remote": True}
-    if not supabase_client.configured():
-        return {"ok": False,
-                "error": "未配置云端数据库：请在 .env 里填写 CLAW_SUPABASE_PROJECT_REF 与 CLAW_SUPABASE_TOKEN",
-                "status": 400}
-    try:
-        data = supabase_client.fetch_user(target_user)
-        pulled_g, pulled_r = _merge_rows(data["galleries"], data["runs"], target_db)
-        merged_g = merged_r = 0
-        if Path(source_db) != Path(target_db):
-            merged_g, merged_r = _merge_rows(
-                db.all_gallery_rows(source_db)[:limit],
-                db.all_run_rows(source_db)[:limit], target_db)
-        if extra_source and extra_source != target_user:
-            ex = supabase_client.fetch_user(extra_source)
-            _merge_rows(ex["galleries"], ex["runs"], target_db)
-        supabase_client.push_user_data(target_user, target_db)
-        return {"ok": True, "username": target_user, "target_user": target_user,
-                "source_user": extra_source or "",
-                "pulled": {"galleries": pulled_g, "runs": pulled_r},
-                "merged": {"galleries": merged_g, "runs": merged_r},
-                "local": {"galleries": len(db.all_gallery_rows(target_db)),
-                           "runs": len(db.all_run_rows(target_db))}}
-    except supabase_client.SupabaseError as exc:
-        return {"ok": False, "error": str(exc), "status": exc.status or 502}
+            placeholders = ",".join("?" for _ in values)
+            rows = conn.execute(
+                f"SELECT {key} FROM {table} WHERE {key} IN ({placeholders})",
+                values).fetchall()
+            return {row[0] for row in rows}
+        finally:
+            conn.close()
 
+    existing_g = _existing("galleries", "gallery_id",
+                           [r.get("gallery_id") for r in gallery_rows])
+    new_g = _new_count(existing_g, [r.get("gallery_id") for r in gallery_rows])
+    new_r = 0
+    if run_rows:
+        existing_r = _existing("scrape_runs", "url",
+                               [r.get("url") for r in run_rows])
+        new_r = sum(1 for r in run_rows if r.get("url") not in existing_r)
 
-def cross_sync(user: dict, target_user: str = "", source_user: str = "") -> dict:
-    """跨账号同步（需求基线 §12.3/§12.5）：
-
-    - 未登录：源本地库 = unlogin_user；target_user 缺省 = unlogin_user
-      （常规同步），传已登录账号名则把 unlogin 的数据合并进该账号本地库 + 云端。
-    - 已登录：源本地库 = 登录账号；target_user 缺省 = 登录账号（常规同步），
-      可传 unlogin_user 做反向合并（登录数据并回匿名库）。
-    - source_user（请求体可选）：第三方账号名，其云端数据也一并并入 target 本地。
-    """
-    if config.storage_is_cloud():
-        return {"ok": True, "cloud_mode": True,
-                "message": "当前为云模式：数据直连云端，无需同步"}
-    source_local_user = (user or {}).get("username", "") or config.UNLOGIN_USER
-    target_user = str(target_user or "").strip() or source_local_user
-    source_db = db.user_db_path(source_local_user)
-    target_db = db.user_db_path(target_user)
-    db.init_db(source_db)
-    db.init_db(target_db)
-    return _cross_merge(target_user, target_db, source_db,
-                        extra_source=str(source_user or "").strip())
+    db.upsert_gallery_rows_from_cloud(gallery_rows, target_db)
+    db.upsert_run_rows_from_cloud(run_rows, target_db)
+    return {"galleries": new_g, "runs": new_r}
 
 
 def sync(user: dict) -> dict:

@@ -318,10 +318,11 @@ grep -rnoE '[A-Za-z]{2,6}_[A-Za-z0-9_-]{24,}' --include='*.py' --include='*.js' 
 
 - 前端不连接 Supabase，不接触管理 token。
 - 云端表必须有 `username` 复合键；常规同步（单用户拉/推）时云端行合并不得跨用户。
-- **例外（需求基线 §12.3）：顶部「同步」允许跨账号合并**——
-  - 未登录：把 `unlogin_user` 本地数据与「当前已登录账号」的云端数据按同一合并规则合并；
-  - 已登录：源数据 = 登录账号，可合并到 `unlogin_user` 或其他已登录账号。
-  - 合并仍然复用 `db.upsert_gallery_rows_from_cloud` / `upsert_run_rows_from_cloud`（标记列 1 覆盖 0、`last_seen` 新者胜），不新增规则；pull 的目标账号名必须显式传参，不能从请求体里裸信。
+- **登录时并入（需求基线 §12.3）**：注册/登录成功后，`sync_service.merge_unlogin_into`
+  把 unlogin_user 本地库的数据按同一合并规则并入登录账号库（单向 unlogin→登录账号，
+  不反向）。unlogin_user 只是未登录态的统一虚拟账号，**没有独立的跨账号同步入口**；
+  这条并入复用 `db.upsert_gallery_rows_from_cloud` / `upsert_run_rows_from_cloud`，
+  不新增规则，幂等（重复登录新增数为 0）。
 - 同步默认流程是「拉云端 → 合并本地 → 推回云端」；本地模式无云端配置也必须能工作。
 - 云端不可用时要返回可读错误，不得清空本地数据。
 - `download_jobs` 属于运行时队列，默认不参与跨部署记录同步；下载文件可以跨用户复用，但数据库标记要按用户维护。

@@ -41,6 +41,7 @@ def get_meta(h) -> None:
             "site_origin": user.get("site_origin", "") if user else "",
         },
         "unlogin_user": config.UNLOGIN_USER,
+        "is_unlogin_user": user is None,
         "supabase_configured": supabase_client.configured(),
         "storage_backend": "cloud" if config.storage_is_cloud() else "local",
         "remote_configured": config.remote_configured(),

@@ -92,7 +92,20 @@ def register(username: str, password: str, api_key: str, site_origin: str,
     max_age = config.SESSION_TTL_HOURS * 3600
     return {"ok": True, "username": created, "cloud_used": cloud_used,
             "cloud_error": cloud_error, "session_token": token,
-            "max_age": max_age}
+            "max_age": max_age, "merged_from_unlogin": _merge_unlogin(created)}
+
+
+def _merge_unlogin(username: str) -> dict:
+    """登录/注册成功后，把未登录期间（unlogin_user 库）的数据并入该账号（§12.3）。
+
+    best-effort：并入失败不阻断登录，只记日志。
+    """
+    try:
+        from app.services import sync_service
+        return sync_service.merge_unlogin_into(username)
+    except Exception as exc:  # 防御性兜底
+        cloud_log(f"登录并入 unlogin_user 数据失败 user={username}: {exc}")
+        return {}
 
 
 def login(username: str, password: str, db_path, sync_creds: bool = False) -> dict:
@@ -120,10 +133,13 @@ def login(username: str, password: str, db_path, sync_creds: bool = False) -> di
         _overlay_cloud_creds(username, db_path)
     elif sync_creds and config.remote_configured():
         _overlay_remote_creds(username, db_path)
+    # §12.3：登录成功即把未登录期间（unlogin_user 库）的数据并入本账号
+    merged = _merge_unlogin(username)
     token = db.create_session(username, path=db_path)
     max_age = config.SESSION_TTL_HOURS * 3600
     return {"ok": True, "username": username, "session_token": token,
-            "max_age": max_age, "creds_synced": bool(sync_creds) or cloud_used}
+            "max_age": max_age, "creds_synced": bool(sync_creds) or cloud_used,
+            "merged_from_unlogin": merged}
 
 
 def _cloud_login_fallback(username: str, password: str, db_path) -> bool:
