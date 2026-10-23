@@ -164,7 +164,9 @@ class SiteEndpointTests(unittest.TestCase):
         status, data = self.call("/api/settings/site", "POST", {"origin": "example.com"})
         self.assertEqual(status, 200)
         self.assertEqual(data["site_origin"], "https://example.com")
-        self.assertEqual(db.get_setting("site_origin", None, self.db_path), "https://example.com")
+        # 匿名（未登录）的 site_origin 落在 unlogin_user 用户库（不再写默认库）
+        anon_db = db.user_db_path(config.UNLOGIN_USER, base_dir=self.db_path.parent)
+        self.assertEqual(db.get_setting("site_origin", None, anon_db), "https://example.com")
 
         _status, meta = self.call("/api/meta")
         self.assertEqual(meta["site_origin"], "https://example.com")

@@ -31,6 +31,11 @@ def make_temp_dir(prefix: str) -> Path:
     return path
 
 
+def anon_db_path(db_path: Path) -> Path:
+    """未登录（匿名）请求的数据库路径：unlogin_user 用户库，与默认库同临时区。"""
+    return db.user_db_path(config.UNLOGIN_USER, base_dir=db_path.parent)
+
+
 class EnvFileTests(unittest.TestCase):
     def test_parse_basic(self):
         text = "\n".join([
@@ -121,12 +126,14 @@ class DownloadCacheModeTests(unittest.TestCase):
         self.db_path = self.tmp / "t.sqlite3"
         self.cache_dir = self.tmp / "download"
         db.init_db(self.db_path)
+        anon_db = anon_db_path(self.db_path)
+        db.init_db(anon_db)
         db.upsert_items(
             [{"gallery_id": 4242, "url": "https://example.net/g/4242/", "title": "Cached Work",
               "languages": ["japanese"]}],
-            source_url="https://example.net/group/x/", path=self.db_path,
+            source_url="https://example.net/group/x/", path=anon_db,
         )
-        db.set_setting("site_origin", "https://example.net", self.db_path)
+        db.set_setting("site_origin", "https://example.net", anon_db)
 
         self._orig_mode = config.DOWNLOAD_MODE
         self._orig_dir = config.DOWNLOADS_DIR
@@ -204,12 +211,14 @@ class DownloadStreamModeTests(unittest.TestCase):
         self.db_path = self.tmp / "t.sqlite3"
         self.cache_dir = self.tmp / "download"
         db.init_db(self.db_path)
+        anon_db = anon_db_path(self.db_path)
+        db.init_db(anon_db)
         db.upsert_items(
             [{"gallery_id": 5151, "url": "https://example.net/g/5151/", "title": "Stream Work",
               "languages": ["japanese"]}],
-            source_url="https://example.net/group/x/", path=self.db_path,
+            source_url="https://example.net/group/x/", path=anon_db,
         )
-        db.set_setting("site_origin", "https://example.net", self.db_path)
+        db.set_setting("site_origin", "https://example.net", anon_db)
 
         self._orig_mode = config.DOWNLOAD_MODE
         self._orig_dir = config.DOWNLOADS_DIR

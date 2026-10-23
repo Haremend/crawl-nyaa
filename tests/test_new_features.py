@@ -31,6 +31,12 @@ def make_temp_dir(prefix: str) -> Path:
     return path
 
 
+def anon_db_path(db_path: Path) -> Path:
+    """未登录（匿名）请求的数据库路径：unlogin_user 用户库，与默认库同临时区。"""
+    from app import config
+    return db.user_db_path(config.UNLOGIN_USER, base_dir=db_path.parent)
+
+
 def item(gid=1001, title="Work A", language="japanese", **extra):
     return GalleryItem(gallery_id=gid, url=f"https://example.net/g/{gid}/",
                        title=title, languages=[language], **extra)
@@ -213,7 +219,11 @@ class NewApiEndpointTests(unittest.TestCase):
         self.tmp = make_temp_dir("newapi")
         self.db_path = self.tmp / "t.sqlite3"
         db.init_db(self.db_path)
-        db.set_setting("site_origin", "https://example.net", self.db_path)
+        # 匿名（未登录）数据/站点设置落 unlogin_user 库（默认库不再存业务数据）
+        anon_db = anon_db_path(self.db_path)
+        db.init_db(anon_db)
+        db.set_setting("site_origin", "https://example.net", anon_db)
+        self.anon_db = anon_db
         self.server = ApiServer(("127.0.0.1", 0), Handler, db_path=self.db_path)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -234,7 +244,7 @@ class NewApiEndpointTests(unittest.TestCase):
 
     def test_hidden_endpoint_logically_deletes_and_filters(self):
         db.upsert_items([item(1), item(2)], source_url="https://example.net/group/a/",
-                        batch_id=1, path=self.db_path)
+                        batch_id=1, path=self.anon_db)
         status, result = self.request_json("/api/hidden", {"ids": [1], "hidden": True},
                                            method="POST")
         self.assertEqual(status, 200)
@@ -245,7 +255,7 @@ class NewApiEndpointTests(unittest.TestCase):
 
     def test_favorites_sync_marks_existing_new_items(self):
         db.upsert_items([item(1, "Existing")], source_url="https://example.net/group/a/",
-                        batch_id=1, path=self.db_path)
+                        batch_id=1, path=self.anon_db)
 
         class FakeUpstream:
             def __init__(self, *_args, **_kwargs):

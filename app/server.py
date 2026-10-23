@@ -137,6 +137,7 @@ class ApiServer(ThreadingHTTPServer):
         self.cover_dir = Path(config.COVER_DIR)
         # 默认账号库保存 users / sessions / download_jobs / 实例级 settings
         db.init_db(self.db_path)
+        self._ensure_unlogin_user()
         self.download_queue = DownloadQueue(self.db_path)
         self.download_queue.start()
         # 每个用户一个 ScrapeService（后台线程状态按用户隔离）
@@ -146,6 +147,18 @@ class ApiServer(ThreadingHTTPServer):
         saved = db.get_setting("proxy_enabled", "", self.db_path)
         if saved != "":
             config.set_proxy_enabled(saved not in ("0", "false", "no"))
+
+    def _ensure_unlogin_user(self) -> None:
+        """兜底注册内置匿名账号 unlogin_user（不存在时）并初始化其用户库。
+
+        匿名（未登录）业务数据挂到此账号的库 data/users/<unlogin_user>.sqlite3。
+        密码随机占位、不可登录。在 ApiServer 构造时做，保证测试与 run.py 都就绪。
+        """
+        name = config.UNLOGIN_USER
+        if not db.get_user(name, self.db_path):
+            from secrets import token_hex
+            db.register_user(name, token_hex(16), path=self.db_path)
+        db.init_db(db.user_db_path(name, base_dir=self.db_path.parent))
 
     def service_for(self, username: str, db_path) -> ScrapeService:
         """按用户取/建抓取服务（匿名用户用空串作 key，落在默认库）。"""
@@ -187,10 +200,18 @@ class Handler(BaseHTTPRequestHandler):
         return user
 
     def _user_db_path(self, user: dict | None) -> Path:
-        """当前用户的业务库路径；未登录用默认库。"""
+        """当前用户的业务库路径。
+
+        登录用户 → data/users/<username>.sqlite3；未登录 → 内置匿名账号
+        unlogin_user 的库（data/users/<unlogin_user>.sqlite3）。用户库统一放
+        在默认库的父目录下（base_dir=默认库父目录），这样测试用临时默认库时
+        匿名/用户库自动落到同一临时区，互不污染；生产环境默认库在 data/ 下，
+        行为与 config.USER_DATA_DIR 一致。
+        """
+        base = Path(self.server.db_path).parent
         if user and user.get("username"):
-            return db.user_db_path(user["username"])
-        return self.server.db_path
+            return db.user_db_path(user["username"], base_dir=base)
+        return db.user_db_path(config.UNLOGIN_USER, base_dir=base)
 
     def _scrape_service(self, user: dict | None) -> ScrapeService:
         """按用户 + 存储模式取抓取服务。

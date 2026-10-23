@@ -309,14 +309,19 @@ grep -rnoE '[A-Za-z]{2,6}_[A-Za-z0-9_-]{24,}' --include='*.py' --include='*.js' 
 ### 10.1 当前用户是一等上下文
 
 - 所有业务接口必须从会话 cookie 解析当前用户，不能相信请求体中的 `username`。
-- 登录用户使用自己的 SQLite；匿名模式保留默认库兼容路径。
+- 登录用户使用自己的 SQLite；**未登录（匿名）数据归内置账号 `unlogin_user` 的用户库**（`data/users/<unlogin_user>.sqlite3`），不再写默认库 `data/gallery.sqlite3`（默认库只留 users/sessions/实例级队列与设置）。起点：`server.py::_user_db_path` 未登录分支返回 `user_db_path(UNLOGIN_USER, base_dir=默认库父目录)`。
+- `unlogin_user` 账号在 `ApiServer` 构造/`run.py` 启动时兜底创建（随机占位密码，不可登录）；切勿把其密码写入日志、响应或 Git。
 - 作品、批次、站点收藏、待下载、已下载、隐藏、下载目标都必须按当前用户隔离。
 - 新增业务路由时，先确定：当前用户是谁、数据库路径是什么、站点 origin/API Key 从哪里来；落空不得回退到其他用户或默认账号库。
 
 ### 10.2 Supabase 只做后端副本
 
 - 前端不连接 Supabase，不接触管理 token。
-- 云端表必须有 `username` 复合键；云端行合并时不得跨用户。
+- 云端表必须有 `username` 复合键；常规同步（单用户拉/推）时云端行合并不得跨用户。
+- **例外（需求基线 §12.3）：顶部「同步」允许跨账号合并**——
+  - 未登录：把 `unlogin_user` 本地数据与「当前已登录账号」的云端数据按同一合并规则合并；
+  - 已登录：源数据 = 登录账号，可合并到 `unlogin_user` 或其他已登录账号。
+  - 合并仍然复用 `db.upsert_gallery_rows_from_cloud` / `upsert_run_rows_from_cloud`（标记列 1 覆盖 0、`last_seen` 新者胜），不新增规则；pull 的目标账号名必须显式传参，不能从请求体里裸信。
 - 同步默认流程是「拉云端 → 合并本地 → 推回云端」；本地模式无云端配置也必须能工作。
 - 云端不可用时要返回可读错误，不得清空本地数据。
 - `download_jobs` 属于运行时队列，默认不参与跨部署记录同步；下载文件可以跨用户复用，但数据库标记要按用户维护。

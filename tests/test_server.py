@@ -42,8 +42,11 @@ class ServerTests(unittest.TestCase):
         cls.tmp = make_temp_dir("server")
         cls.db_path = cls.tmp / "server.sqlite3"
         db.init_db(cls.db_path)
+        # 匿名（未登录）数据归 unlogin_user 库；种子数据写到这里，测试才是真实路径
+        cls.anon_db = db.user_db_path(_c.UNLOGIN_USER, base_dir=cls.db_path.parent)
+        db.init_db(cls.anon_db)
         page = parse_listing(SAMPLE.read_text(encoding="utf-8"), BASE_URL)
-        db.upsert_items(page.items, source_url=BASE_URL, path=cls.db_path)
+        db.upsert_items(page.items, source_url=BASE_URL, path=cls.anon_db)
         cls.server = ApiServer(("127.0.0.1", 0), Handler, db_path=cls.db_path)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
@@ -169,12 +172,14 @@ class BatchTimestampFilterTests(unittest.TestCase):
         cls.tmp = make_temp_dir("batch_ts")
         cls.db_path = cls.tmp / "batch_ts.sqlite3"
         db.init_db(cls.db_path)
+        anon_db = db.user_db_path(_c.UNLOGIN_USER, base_dir=cls.db_path.parent)
+        db.init_db(anon_db)
         from app.parser import GalleryItem
         db.upsert_items(
             [GalleryItem(gallery_id=777777, url="https://example.net/g/777777/",
                          title="Timestamp batch test", languages=["japanese"])],
             source_url="https://example.net/group/x/",
-            batch_id=1792575483429, path=cls.db_path)
+            batch_id=1792575483429, path=anon_db)
         cls.server = ApiServer(("127.0.0.1", 0), Handler, db_path=cls.db_path)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()

@@ -30,10 +30,27 @@ def ensure_user_dbs() -> None:
     已存在的残缺库补表，也给云模式下从未建库的用户建好全表，让两种存储
     模式下「读侧/下载队列始终可用、写侧不依赖用户库」都成立。
     """
+    _ensure_unlogin_user()
     user_paths = list(db.iter_user_db_paths(config.DB_PATH))
     for path in user_paths:
         db.init_db(path)
     print(f"[启动] 数据检查   ：已为 {len(user_paths)} 个用户库确保全表")
+
+
+def _ensure_unlogin_user() -> None:
+    """兜底注册内置匿名账号 unlogin_user（不存在时）。
+
+    匿名业务数据挂在此账号的用户库 data/users/<unlogin_user>.sqlite3；
+    密码为随机占位值，任何人都输不出来、恒不能登录。已存在则跳过。
+    """
+    name = config.UNLOGIN_USER
+    if db.get_user(name, config.DB_PATH):
+        return
+    from secrets import token_hex
+    # 随机密码经 register_user 的 PBKDF2 哈希落库，无人知晓、恒不能登录
+    db.register_user(name, token_hex(16), path=config.DB_PATH)
+    db.init_db(db.user_db_path(name, base_dir=Path(config.DB_PATH).parent))
+    print(f"[启动] 数据检查   ：已兜底创建匿名账号 {name}（随机占位密码，不可登录）")
 
 
 def main(argv=None) -> int:

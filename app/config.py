@@ -118,6 +118,10 @@ PORT = int(os.environ.get("CLAW_PORT", "8787"))
 SESSION_TTL_HOURS = max(1, int(os.environ.get("CLAW_SESSION_TTL_HOURS", "720") or 720))
 # 登录用户的独立 SQLite 目录：data/users/<用户名>.sqlite3
 USER_DATA_DIR = Path(os.environ.get("CLAW_USER_DATA_DIR", "") or (DATA_DIR / "users")).resolve()
+# 未登录（匿名）使用的内置账号名：匿名抓取/收藏/下载等业务数据挂到此账号的用户库
+# data/users/<unlogin_user>.sqlite3，与默认库解耦（默认库只留账号/会话/实例级队列）。
+# 启动时若本地无此账号，自动用随机占位密码注册（不可被真实登录）。
+UNLOGIN_USER = (os.environ.get("CLAW_UNLOGIN_USER", "") or "unlogin_user").strip()
 
 # ---- 云端数据库（Supabase，可选）----
 # .env 默认不启用云端：留空 project_ref / token 即纯本地模式。
