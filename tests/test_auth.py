@@ -557,16 +557,55 @@ class LoginSyncCredsTests(unittest.TestCase):
 
     def test_login_with_switch_overlays_cloud_creds(self):
         self._register_demo_with_local_creds()
-        status, data, _ = http("POST", self.base, "/api/auth/login",
-                               body={"username": "demo", "password": "pass1",
-                                     "sync_creds": True})
+        status, data, sc = http("POST", self.base, "/api/auth/login",
+                                body={"username": "demo", "password": "pass1",
+                                      "sync_creds": True})
         self.assertEqual(status, 200)
         user = db.get_user("demo", self.db_path)
         # 开启「同步云端配置」：api_key / site_origin 被云端值覆盖
         self.assertEqual(user["api_key"], "cloud-key")
         self.assertEqual(user["site_origin"], "https://cloud.example.net")
+        # 站点要写进用户库 settings：顶栏 chip 走 /api/meta → 本地模式读
+        # settings.site_origin，只写 users 表不会反映到前端
+        user_db = db.user_db_path("demo")
+        self.assertEqual(db.get_setting("site_origin", "", user_db),
+                         "https://cloud.example.net")
+        # 会话视图（顶栏登录用户名来源）同步为云端值
+        session = session_cookie(sc)
+        self.assertTrue(session)
+        status, meta, _ = http("GET", self.base, "/api/meta", cookie=session)
+        self.assertEqual(status, 200)
+        self.assertEqual(meta["site_origin"], "https://cloud.example.net")
         # 覆盖凭据不能破坏本地密码：原密码仍能验证
         self.assertTrue(db.verify_user("demo", "pass1", self.db_path))
+
+    def test_cloud_fallback_rebuild_writes_settings_site(self):
+        """云回退重建账号（本地无该账号）：站点同样要落到用户库 settings。"""
+        status, data, _ = http("POST", self.base, "/api/auth/register",
+                               body={"username": "gina", "password": "pass9"})
+        self.assertEqual(status, 200)
+        conn = db.connect(self.db_path)
+        try:
+            conn.execute("DELETE FROM users WHERE username = ?", ("gina",))
+            conn.commit()
+        finally:
+            conn.close()
+        # 云端预置 gina 账号行（凭据齐全，可直接登录）
+        g_salt, g_hash = db.hash_password("pass9")
+        self.fake.accounts["gina"] = {
+            "username": "gina",
+            "api_key": "cloud-key-g",
+            "site_origin": "https://cloud.example.net",
+            "password_hash": g_hash,
+            "salt": g_salt,
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+        status, data, _ = http("POST", self.base, "/api/auth/login",
+                               body={"username": "gina", "password": "pass9"})
+        self.assertEqual(status, 200)
+        user_db = db.user_db_path("gina")
+        self.assertEqual(db.get_setting("site_origin", "", user_db),
+                         "https://cloud.example.net")
 
     def test_local_verify_cloud_fallback_still_overlays(self):
         """本地无账号行时走云回退：重建的账号行凭据来自云端。"""
@@ -591,6 +630,10 @@ class LoginSyncCredsTests(unittest.TestCase):
         self.assertIsNotNone(user, "云回退后本地账号行应被重建")
         self.assertEqual(user["api_key"], "cloud-key")
         self.assertEqual(user["site_origin"], "https://cloud.example.net")
+        # 重建账号时站点同样落到用户库 settings（顶栏 chip 的读取源）
+        user_db = db.user_db_path("demo")
+        self.assertEqual(db.get_setting("site_origin", "", user_db),
+                         "https://cloud.example.net")
         self.assertTrue(db.verify_user("demo", "pass1", self.db_path))
 
 

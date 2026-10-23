@@ -15,6 +15,7 @@ from typing import Any
 
 from .. import config
 from .schema import _WRITE_LOCK, connect, utc_now
+from .settings import set_setting
 
 # 保留 db._WRITE_LOCK 的引用（server._cloud_login_fallback 直接摸它做本地重建）
 __all__ = ["_WRITE_LOCK"]

@@ -181,6 +181,10 @@ def _cloud_login_fallback(username: str, password: str, db_path) -> bool:
         site_origin=str(account.get("site_origin") or ""), path=db_path)
     # 同 register：云/本地都初始化用户库全表，避免下载队列/设置写入缺表。
     db.init_db(db.user_db_path(username))
+    # 站点同样落到用户库 settings：顶栏 chip / 业务取址读的是 settings 表
+    cloud_origin = str(account.get("site_origin") or "").strip()
+    if cloud_origin:
+        db.set_setting("site_origin", cloud_origin, db.user_db_path(username))
     return True
 
 
@@ -200,6 +204,12 @@ def _overlay_cloud_creds(username: str, db_path) -> None:
                 api_key=str(account.get("api_key") or ""),
                 site_origin=str(account.get("site_origin") or ""),
                 path=db_path, preserve_auth=True)
+            cloud_origin = str(account.get("site_origin") or "").strip()
+            # 双写用户库 settings：顶栏/meta 的站点读的是 settings 表，
+            # 只写 users 表 chip 不会变；settings 表由 init_db 保证存在
+            if cloud_origin:
+                db.set_setting("site_origin", cloud_origin,
+                               db.user_db_path(username))
     except (remote_client.RemoteError, supabase_client.SupabaseError) as exc:
         cloud_log(f"登录同步云端配置失败 user={username}: {exc}")
 
