@@ -217,5 +217,46 @@ class DownloadQueueSelfHealTests(unittest.TestCase):
         self.assertTrue(self.queue.running)
 
 
+class ClearFailedJobsTests(unittest.TestCase):
+    """「清除失败任务」：只删 failed/cancelled，不动 queued/done，且按用户隔离。"""
+
+    def setUp(self):
+        self.tmp = make_temp_dir("clear")
+        self.db_path = self.tmp / "t.sqlite3"
+        db.init_db(self.db_path)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_clear_removes_only_failed_and_cancelled(self):
+        queued = db.create_job(1001, title="A", fmt="zip", path=self.db_path)
+        failed = db.create_job(1002, title="B", fmt="zip", path=self.db_path)
+        cancelled = db.create_job(1003, title="C", fmt="zip", path=self.db_path)
+        done = db.create_job(1004, title="D", fmt="zip", path=self.db_path)
+        db.update_job(failed, path=self.db_path, status="failed", error="boom")
+        db.update_job(cancelled, path=self.db_path, status="cancelled")
+        db.update_job(done, path=self.db_path, status="done", finished_at=db.utc_now())
+
+        removed = db.clear_failed_jobs(self.db_path)
+        self.assertEqual(removed, 2)
+        remaining = {int(j["job_id"]): j["status"] for j in db.list_jobs(self.db_path, limit=50)}
+        self.assertEqual(remaining[queued], "queued")
+        self.assertEqual(remaining[done], "done")
+        self.assertNotIn(failed, remaining)
+        self.assertNotIn(cancelled, remaining)
+
+    def test_clear_scoped_to_username(self):
+        other = db.create_job(2001, title="X", fmt="zip", username="other", path=self.db_path)
+        mine = db.create_job(2002, title="Y", fmt="zip", username="me", path=self.db_path)
+        db.update_job(other, path=self.db_path, status="failed")
+        db.update_job(mine, path=self.db_path, status="failed")
+
+        removed = db.clear_failed_jobs(self.db_path, username="me")
+        self.assertEqual(removed, 1)
+        remaining = [int(j["job_id"]) for j in db.list_jobs(self.db_path, limit=50)]
+        self.assertIn(other, remaining, "其它用户的任务不受影响")
+        self.assertNotIn(mine, remaining)
+
+
 if __name__ == "__main__":
     unittest.main()

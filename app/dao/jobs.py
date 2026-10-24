@@ -143,6 +143,24 @@ def cancel_queued_jobs(path: str | Path | None = None) -> int:
             conn.close()
 
 
+def clear_failed_jobs(path: str | Path | None = None, username: str = "") -> int:
+    """删除当前用户（或全部）的 failed/cancelled 任务行。"""
+    with _WRITE_LOCK:
+        conn = connect(path)
+        try:
+            if username:
+                cursor = conn.execute(
+                    "DELETE FROM download_jobs WHERE status IN ('failed','cancelled') AND username = ?",
+                    (username,))
+            else:
+                cursor = conn.execute(
+                    "DELETE FROM download_jobs WHERE status IN ('failed','cancelled')")
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        finally:
+            conn.close()
+
+
 def reset_stale_jobs(path: str | Path | None = None) -> int:
     """进程重启后，把上次遗留的 running 任务重新放回队列。"""
     with _WRITE_LOCK:

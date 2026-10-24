@@ -34,6 +34,8 @@ const state = {
   finishedRunId: null,
   urlInitialized: false,
   limitsInitialized: false,
+  siteOrigin: "",
+  expandedTags: new Set(),
 };
 
 const $ = (id) => document.getElementById(id);
@@ -575,6 +577,7 @@ async function loadMeta() {
   renderLastRun(meta.stats.last_run);
   renderDownloadSummary(meta.download_status);
   renderSiteChip(meta.site_origin);
+  state.siteOrigin = state.siteOrigin || meta.site_origin || "";
   renderKeyChip();
   renderDownloadMode(meta.download_mode);
   state.batches = meta.batches || [];
@@ -749,9 +752,14 @@ function cardHtml(item) {
   const langBadges = (item.languages || []).map((lang) =>
     '<span class="badge lang-' + esc(lang.key) + '">' + esc(lang.label) + "</span>").join("");
   const tagList = item.tags || [];
-  const tagBadges = tagList.map((tag) =>
+  const MAX_TAGS = 10;
+  const tagBadges = tagList.slice(0, MAX_TAGS).map((tag) =>
     '<button class="badge tag tag-btn" data-tag="' + esc(tag) + '" title="点击按此标签搜索">'
     + esc(tag) + "</button>").join("");
+  const tagOverflowCount = tagList.length > MAX_TAGS ? tagList.length - MAX_TAGS : 0;
+  const tagOverflow = tagOverflowCount > 0
+    ? '<button class="tag-expand-btn" data-gid="' + gid + '" data-count="' + tagOverflowCount + '">还有 ' + tagOverflowCount + " 个</button>"
+    : "";
 
   const variants = item.variant_count > 1
     ? '<details class="variants-list"><summary>查看 ' + item.variant_count + ' 个版本</summary><ul>'
@@ -781,7 +789,8 @@ function cardHtml(item) {
     + esc(item.title) + "</a></h3>"
     + originalLine
     + '<div class="badges">' + uncensoredBadge + doneBadge + siteBadge + variantBadge + langBadges + "</div>"
-    + '<div class="badges">' + tagBadges + "</div>"
+    + '<div class="badges" data-gid="' + gid + '" data-full-tags=\'' + JSON.stringify(tagList).replace(/'/g, "\\'") + '\'">'
+    + tagBadges + tagOverflow + "</div>"
     + '<div class="card-actions">' + wantBtn + dlBtn + hideBtn + "</div>"
     + variants
     + '<div class="card-meta"><span>#' + esc(item.gallery_id) + "</span><span>" + esc(factLine) + "</span></div>"
@@ -937,11 +946,16 @@ function jobRowHtml(job) {
     ? '<button class="btn ghost q-cancel" data-cancel-job="' + job.job_id + '">取消</button>' : "";
   const title = esc(job.title || ("#" + job.gallery_id));
   const error = job.error ? ' · <span style="color:#d93025">' + esc(job.error.slice(0, 60)) + "</span>" : "";
+  const jobOrigin = (job.origin || state.siteOrigin || "").replace(/\/$/, "");
+  const openUrl = jobOrigin && job.gallery_id
+    ? (jobOrigin + "/g/" + esc(job.gallery_id) + "/") : "";
+  const openBtn = openUrl
+    ? '<a class="btn ghost q-open" href="' + esc(openUrl) + '" target="_blank" rel="noopener noreferrer" title="打开该作品原始网页">原网页</a>' : "";
   return '<div class="queue-item ' + esc(status) + '">'
     + '<div class="q-name"><span class="q-title">' + title + "</span>"
     + '<span class="q-sub">#' + esc(job.gallery_id) + " · " + esc(statusText) + " · " + esc(sizeText) + error + "</span></div>"
     + '<div class="q-bar"><span style="width:' + pct + '%"></span></div>'
-    + '<div class="q-pct">' + pct + "%</div>" + cancelBtn + "</div>";
+    + '<div class="q-pct">' + pct + "%</div>" + cancelBtn + openBtn + "</div>";
 }
 
 function renderQueue(queue) {
@@ -1414,6 +1428,19 @@ function bindEvents() {
       pollDownload();
     } catch (error) { toast(error.message, "error"); }
   });
+  $("queueClearFailedBtn").addEventListener("click", async () => {
+    const removed = confirm("清除队列中所有「失败」和「已取消」的任务记录？（不影响正在下载/排队的任务）");
+    if (!removed) return;
+    try {
+      const result = await api("/api/download/jobs/clear-failed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      toast("已清除 " + (result.removed || 0) + " 条失败/取消记录", "ok");
+      pollDownload();
+    } catch (error) { toast("清除失败：" + error.message, "error"); }
+  });
 
   $("queueList").addEventListener("click", async (event) => {
     const btn = event.target.closest("button[data-cancel-job]");
@@ -1522,6 +1549,37 @@ function bindEvents() {
       if (state.tab !== "library") await switchTab("library");
       loadWorks().catch((error) => toast(error.message, "error"));
       toast("已按标签「" + tag + "」搜索");
+      return;
+    }
+    // 标签「还有 N 个」展开 / 「收起」
+    const expandBtn = event.target.closest("button.tag-expand-btn");
+    if (expandBtn) {
+      const container = expandBtn.closest(".badges");
+      const fullTags = JSON.parse(container.dataset.fullTags || "[]");
+      const gid = container.dataset.gid;
+      state.expandedTags = state.expandedTags || new Set();
+      const shownCount = 10;
+      const hiddenTags = fullTags.slice(shownCount);
+      const hiddenBtns = hiddenTags.map((tag) =>
+        '<button class="badge tag tag-btn" data-tag="' + esc(tag) + '" title="点击按此标签搜索">'
+        + esc(tag) + "</button>").join("");
+      expandBtn.outerHTML = hiddenBtns + '<button class="tag-collapse-btn" data-gid="' + esc(gid) + '">收起</button>';
+      state.expandedTags.add(gid);
+      return;
+    }
+    const collapseBtn = event.target.closest("button.tag-collapse-btn");
+    if (collapseBtn) {
+      const container = collapseBtn.closest(".badges");
+      const fullTags = JSON.parse(container.dataset.fullTags || "[]");
+      const gid = container.dataset.gid;
+      container.querySelectorAll("button.tag-btn").forEach((btn, i) => { if (i >= 10) btn.remove(); });
+      collapseBtn.remove();
+      const remaining = fullTags.length - 10;
+      if (remaining > 0) {
+        container.insertAdjacentHTML("beforeend",
+          '<button class="tag-expand-btn" data-gid="' + esc(gid) + '" data-count="' + remaining + '">还有 ' + remaining + " 个</button>");
+      }
+      if (state.expandedTags) state.expandedTags.delete(gid);
       return;
     }
     const hideBtn = event.target.closest("button.hide-btn");

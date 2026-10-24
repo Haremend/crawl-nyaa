@@ -123,6 +123,10 @@ class DownloadQueue:
         count = db.cancel_queued_jobs(self.db_path)
         return {"cancelled_queued": count, "signalled_running": len(events)}
 
+    def clear_failed_jobs(self, username: str = "") -> int:
+        """删除当前用户（或全部）的 failed/cancelled 任务。"""
+        return db.clear_failed_jobs(self.db_path, username=username)
+
     # ---------- 状态 ----------
     def snapshot(self, limit: int = 100) -> dict:
         jobs = db.list_jobs(self.db_path, limit=limit)
@@ -207,10 +211,6 @@ class DownloadQueue:
             return
 
         download_dir = Path(config.DOWNLOADS_DIR)
-        batch_id = job.get("batch_id")
-        if str(job.get("source") or "") == "batch" and batch_id:
-            # 整批保存：落到独立子目录，便于整批管理
-            download_dir = download_dir / f"batch_{int(batch_id)}"
         download_dir.mkdir(parents=True, exist_ok=True)
         target = download_dir / download_filename(gallery_id, title, fmt)
 
@@ -292,11 +292,15 @@ class DownloadQueue:
         # 文件在服务器上只存一份：当前用户标记自己的库即可，
         # 其它用户以后触发同一作品时会命中磁盘文件并标记自己的库。
         db.set_downloaded([gallery_id], True, user_db)
-        if str(job.get("source") or "") == "batch" and batch_id:
-            self._write_batch_manifest(int(batch_id), download_dir, user_db)
+        manifest_batch_id = job.get("batch_id")
+        if str(job.get("source") or "") == "batch" and manifest_batch_id:
+            self._write_batch_manifest(int(manifest_batch_id), download_dir, user_db)
 
     def _write_batch_manifest(self, batch_id: int, directory: Path, user_db) -> None:
-        """在批次目录里写清单（JSON + CSV），记录来源与作品列表。"""
+        """在下载目录里写清单（JSON + CSV），记录来源与作品列表。
+
+        批次文件与作品文件统一放下载根目录，清单用 batch_{id} 前缀避免多批次互相覆盖。
+        """
         import csv
         import json as _json
 
@@ -331,9 +335,9 @@ class DownloadQueue:
                     for it in items
                 ],
             }
-            (directory / "manifest.json").write_text(
+            (directory / f"manifest_batch_{batch_id}.json").write_text(
                 _json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-            with (directory / "works.csv").open("w", newline="", encoding="utf-8-sig") as fh:
+            with (directory / f"works_batch_{batch_id}.csv").open("w", newline="", encoding="utf-8-sig") as fh:
                 writer = csv.writer(fh)
                 writer.writerow(["gallery_id", "title", "title_original", "languages",
                                  "num_pages", "uncensored", "url"])

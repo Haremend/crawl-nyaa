@@ -364,6 +364,14 @@ def post_download_jobs_cancel(h) -> None:
     h._json({"ok": True, **info, **h._filtered_jobs(user)})
 
 
+def post_download_jobs_clear_failed(h) -> None:
+    """POST /api/download/jobs/clear-failed：清除当前用户的 failed/cancelled 任务行。"""
+    user = h._current_user()
+    username = user.get("username", "") if user else ""
+    removed = h.server.download_queue.clear_failed_jobs(username=username)
+    h._json({"ok": True, "removed": removed})
+
+
 def post_reset(h) -> None:
     """POST /api/reset：清空作品与批次（云/本地）。"""
     user = h._current_user()
