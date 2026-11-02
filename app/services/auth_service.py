@@ -108,29 +108,15 @@ def _merge_unlogin(username: str) -> dict:
         return {}
 
 
-def _auto_pull(username: str) -> dict:
-    """登录成功后自动拉远端数据合并进本地库（§12.5，登录即拉）。
-
-    幂等合并：已存在的 gallery_id 跳过、last_seen 新者胜，重复登录不产生
-    脏数据。best-effort：云端未配置/拉取失败只记日志，不阻断登录；
-    云模式下 pull 是 no-op（数据本就在云端）。
-    """
-    try:
-        from app.services import sync_service
-        result = sync_service.pull({"username": username})
-        if result.get("ok"):
-            return result.get("pulled", {})
-    except Exception as exc:  # 防御性兜底
-        cloud_log(f"登录自动拉取失败 user={username}: {exc}")
-    return {}
-
-
 def login(username: str, password: str, db_path, sync_creds: bool = False) -> dict:
     """登录：本地 verify 优先；失败且（remote 或 supabase 可用）时走云回退。
 
     sync_creds=True（需求基线 §12.4）：登录成功后用云端账号的 site_origin/api_key
     覆盖本地该账号行这两个字段；False 时只用本地值，不被云端覆盖。
     云回退重建（本地无该账号）时云端凭据作为初始值写入（开关语义自然成立）。
+
+    登录**不再自动拉取远端作品数据**：登录只做身份验证 + 匿名数据并入 + 建会话，
+    远端同步由用户在【设置 → 数据同步】里手动拉取/推送（2026-11-02 调整）。
 
     返回 {ok, username, session_token, max_age, error, status}。
     """
@@ -152,13 +138,11 @@ def login(username: str, password: str, db_path, sync_creds: bool = False) -> di
         _overlay_remote_creds(username, db_path)
     # §12.3：登录成功即把未登录期间（unlogin_user 库）的数据并入本账号
     merged = _merge_unlogin(username)
-    # §12.5：登录后自动拉远端数据合并进本地库（best-effort，失败不阻断登录）
-    auto_pulled = _auto_pull(username)
     token = db.create_session(username, path=db_path)
     max_age = config.SESSION_TTL_HOURS * 3600
     return {"ok": True, "username": username, "session_token": token,
             "max_age": max_age, "creds_synced": bool(sync_creds) or cloud_used,
-            "merged_from_unlogin": merged, "pulled": auto_pulled}
+            "merged_from_unlogin": merged}
 
 
 def _cloud_login_fallback(username: str, password: str, db_path) -> bool:

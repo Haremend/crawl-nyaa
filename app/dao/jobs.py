@@ -161,6 +161,23 @@ def clear_failed_jobs(path: str | Path | None = None, username: str = "") -> int
             conn.close()
 
 
+def update_job_file_path(old_path: str, new_path: str,
+                         path: str | Path | None = None) -> int:
+    """批量更新 file_path 匹配的任务行（文件重命名后保持 DB 一致）。"""
+    if not old_path:
+        return 0
+    with _WRITE_LOCK:
+        conn = connect(path)
+        try:
+            cursor = conn.execute(
+                "UPDATE download_jobs SET file_path = ? WHERE file_path = ?",
+                (new_path, old_path))
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        finally:
+            conn.close()
+
+
 def reset_stale_jobs(path: str | Path | None = None) -> int:
     """进程重启后，把上次遗留的 running 任务重新放回队列。"""
     with _WRITE_LOCK:

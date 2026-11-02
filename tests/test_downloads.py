@@ -258,5 +258,74 @@ class ClearFailedJobsTests(unittest.TestCase):
         self.assertNotIn(mine, remaining)
 
 
+class RenameFilesTests(unittest.TestCase):
+    """「重命名已下载文件」：按原始标题改名 + Windows 非法字符净化。"""
+
+    def setUp(self):
+        from app import config
+        self.config = config
+        self.tmp = make_temp_dir("rename")
+        self.db_path = self.tmp / "t.sqlite3"
+        db.init_db(self.db_path)
+        self.old_dir = config.DOWNLOADS_DIR
+        self.dl_dir = self.tmp / "download"
+        self.dl_dir.mkdir()
+        config.DOWNLOADS_DIR = self.dl_dir
+        db.upsert_items([
+            {"gallery_id": 5001, "url": "https://example.net/g/5001/",
+             "title": "List Title", "title_pretty": "Pretty Title",
+             "title_original": "Original: Title? <Test>", "languages": ["japanese"]},
+            {"gallery_id": 5002, "url": "https://example.net/g/5002/",
+             "title": "Only List", "title_pretty": "", "title_original": "",
+             "languages": ["english"]},
+        ], source_url="demo", path=self.db_path)
+        from app.services import download_service
+        self.svc = download_service
+
+    def tearDown(self):
+        self.config.DOWNLOADS_DIR = self.old_dir
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_get_title_prefers_original(self):
+        self.assertEqual(db.get_title(5001, self.db_path), "Original: Title? <Test>")
+        self.assertEqual(db.get_title(5002, self.db_path), "Only List", "无原始标题回退列表标题")
+
+    def test_want_targets_use_original_title(self):
+        db.set_want_download([5001], True, self.db_path)
+        targets = db.list_want_download_targets(self.db_path)
+        self.assertEqual(targets[0]["title"], "Original: Title? <Test>")
+
+    def test_rename_uses_original_title_and_sanitizes(self):
+        (self.dl_dir / "5001_old-name.zip").write_bytes(b"x")
+        (self.dl_dir / "5002_legacy.cbz").write_bytes(b"x")
+        (self.dl_dir / "9999_unknown.zip").write_bytes(b"x")
+        result = self.svc.rename_downloaded_files(None, self.db_path, cloud_mode=False)
+        self.assertEqual(result["renamed"], 2)
+        self.assertEqual(result["missing"], 1, "数据库无记录的文件保持原名")
+        names = {p.name for p in self.dl_dir.iterdir()}
+        # 非法字符 : ? < > 换成空格并折叠
+        self.assertIn("5001_Original Title Test.zip", names)
+        self.assertIn("5002_Only List.cbz", names, "无原始标题时回退列表标题")
+        self.assertIn("9999_unknown.zip", names)
+        self.assertNotIn("5001_old-name.zip", names)
+
+    def test_rename_is_idempotent(self):
+        (self.dl_dir / "5001_old-name.zip").write_bytes(b"x")
+        self.svc.rename_downloaded_files(None, self.db_path, cloud_mode=False)
+        second = self.svc.rename_downloaded_files(None, self.db_path, cloud_mode=False)
+        self.assertEqual(second["renamed"], 0)
+        self.assertEqual(second["unchanged"], 1)
+
+    def test_rename_conflict_skips(self):
+        (self.dl_dir / "5001_old-name.zip").write_bytes(b"x")
+        (self.dl_dir / "5001_Original Title Test.zip").write_bytes(b"y")
+        result = self.svc.rename_downloaded_files(None, self.db_path, cloud_mode=False)
+        self.assertEqual(result["renamed"], 0)
+        self.assertEqual(result["conflicts"], 1)
+        names = {p.name for p in self.dl_dir.iterdir()}
+        self.assertIn("5001_old-name.zip", names, "冲突时保留原文件不覆盖")
+        self.assertIn("5001_Original Title Test.zip", names)
+
+
 if __name__ == "__main__":
     unittest.main()

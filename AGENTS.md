@@ -75,9 +75,10 @@
 - **不要把上游的签名下载地址直接交给浏览器**：签名与取签名时的出口 IP/会话绑定，
   后端走代理时浏览器直连会 `Invalid signature`；跨域地址上 `download` 属性也会被忽略（变成页面跳转）。
   统一下载入口：`GET /api/download/file?gallery_id=..&format=..&apikey=..`（同源 + `attachment`）
-- **落盘文件名一律用 `app.filenames.download_filename()`**，格式 `{id}_{名称}.{ext}`：
-  它会处理非法字符、结尾点/空格、Windows 保留名、长度上限与空标题兜底。
-  不要自己拼文件名。
+- **落盘文件名一律用 `app.filenames.download_filename()`**，格式 `{id}_{原始作品名称}.{ext}`
+  （标题优先 `title_original`，缺则 `title_pretty`/`title`）：它会处理非法字符、
+  结尾点/空格、Windows 保留名、长度上限与空标题兜底。不要自己拼文件名。
+  历史文件可用设置弹窗「重命名已下载文件」（`POST /api/download/rename-files`）批量改正。
 
 ### 1.7 配置走 .env，不要硬编码
 

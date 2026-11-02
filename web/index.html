@@ -283,10 +283,6 @@
           <input id="authKey" type="password" spellcheck="false" placeholder="留空则稍后在设置里填写">
         </label>
       </div>
-      <label class="check" id="syncCredsWrap" hidden>
-        <input id="syncCredsCheck" type="checkbox">
-        <span>同步云端配置<br><small>开启后，用云端账号的站点域名与 API Key 覆盖本地保存的值（默认关闭）</small></span>
-      </label>
       <p class="modal-hint" id="authHint">登录后你的站点域名与 API Key 会跟账号走，不同设备登录无需重输。</p>
       <div class="modal-actions">
         <button class="btn primary" id="authSubmit">登录</button>
@@ -327,6 +323,17 @@
         </div>
       </div>
       <p class="modal-hint" id="syncResult"></p>
+      <hr class="modal-sep">
+      <div class="sync-row" id="renameRow">
+        <div>
+          <strong>整理下载文件名</strong>
+          <p class="modal-hint">把 <code>download/</code> 里的作品文件按数据库原始标题重命名为 <code>{id}_{原始作品名称}.{ext}</code>（自动处理 Windows 非法字符）。</p>
+        </div>
+        <div class="sync-buttons">
+          <button class="btn ghost" id="renameFilesBtn">重命名已下载文件</button>
+        </div>
+      </div>
+      <p class="modal-hint" id="renameResult"></p>
     </div>
   </div>
 </div>

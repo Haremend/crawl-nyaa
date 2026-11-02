@@ -33,7 +33,7 @@ AGENTS.md 是权威约束文件，本文件不重复其内容，只做入口指�
 - **零第三方依赖**：后端只用 Python 标准库（`urllib`/`html.parser`/`sqlite3`/`http.server`），前端原生 HTML/CSS/JS，无 npm 无构建。不要引入 requests/bs4/flask/react。
 - **站点地址只能来自三处**：用户输入的列表页 URL（代码从其中派生 origin）、环境变量 `CLAW_API_ORIGIN`、最近一次抓取记录。不得在代码里写死域名。
 - **出网统一走 `Fetcher()`**：不要显式传 `proxy=` 或自己拼 `ProxyHandler`，否则会绕过「代理开关」（开关状态存 `settings` 表 `proxy_enabled` 键，关闭时 `Fetcher` 直连）。历史 bug：`Fetcher(proxy=config.PROXY)` 导致关代理后仍走代理报 407。
-- **下载走后端转发 + 文件名净化**：上游签名 URL 不得直接给浏览器；落盘文件名一律用 `app/filenames.download_filename()`，格式 `{id}_{名称}.{ext}`。
+- **下载走后端转发 + 文件名净化**：上游签名 URL 不得直接给浏览器；落盘文件名一律用 `app/filenames.download_filename()`，格式 `{id}_{原始作品名称}.{ext}`（优先 `title_original`）。
 - **上游接口 Key 规则**：`auth=False`（详情/标签/站点配置）不带 `Authorization` 头；`auth=True`（收藏/下载/账号）才带。回归测试在 `tests/test_downloads.py`。
 
 ## 架构地图
@@ -54,7 +54,7 @@ AGENTS.md 是权威约束文件，本文件不重复其内容，只做入口指�
 - `app/server.py` — 内置 `ThreadingHTTPServer` + `Handler`（基础设施：guard、响应工具、静态/封面文件服务、路由分派），~540 行，业务已全下沉到三层
 - `app/parser.py` — 列表页 HTML 解析（`HTMLParser` + 正则降级）；语言来自卡片 `lang-xx` class
 - `app/titles.py` — 标题指纹与「是否同一作品」判定，去重核心算法
-- `app/filenames.py` — 下载文件名净化 `{id}_{名称}.{ext}`
+- `app/filenames.py` — 下载文件名净化 `{id}_{原始作品名称}.{ext}`
 - `web/` — 原生单页前端（`index.html`/`app.js`/`style.css`），由后端托管
 
 **定位某个功能**：先看 `app/controllers/routes.py` 路由表找到端点 → 对应 controller 文件（解析/格式化）→ 它调的 `app/services/*`（业务）→ 里面的 `app/dao/*` 或 `supabase_client`/`remote_client`（数据）。

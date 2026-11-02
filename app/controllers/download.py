@@ -372,6 +372,18 @@ def post_download_jobs_clear_failed(h) -> None:
     h._json({"ok": True, "removed": removed})
 
 
+def post_rename_files(h) -> None:
+    """POST /api/download/rename-files：把下载目录文件重命名成 {id}_{原始标题}.{ext}。"""
+    user = h._current_user()
+    try:
+        result = download_service.rename_downloaded_files(
+            user, h._user_db_path(user), cloud_mode=config.storage_is_cloud())
+    except supabase_client.SupabaseError as exc:
+        h._error(str(exc), exc.status or 502)
+        return
+    h._json(result)
+
+
 def post_reset(h) -> None:
     """POST /api/reset：清空作品与批次（云/本地）。"""
     user = h._current_user()

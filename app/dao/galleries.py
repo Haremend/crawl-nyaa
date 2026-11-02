@@ -514,7 +514,7 @@ def list_batch_targets(batch_id: int, path: str | Path | None = None,
         main = ordered[0]
         targets.append({
             "gallery_id": int(main["gallery_id"]),
-            "title": (main["title_pretty"] or main["title"] or ""),
+            "title": _download_title(main),
         })
     targets.sort(key=lambda item: -item["gallery_id"])
     return targets
@@ -548,7 +548,7 @@ def list_want_download_targets(path: str | Path | None = None,
         main = ordered[0]
         targets.append({
             "gallery_id": int(main["gallery_id"]),
-            "title": (main["title_pretty"] or main["title"] or ""),
+            "title": _download_title(main),
         })
     targets.sort(key=lambda item: -item["gallery_id"])
     return targets
@@ -626,19 +626,42 @@ def set_site_favorite(gallery_ids: Sequence[int], favorite: bool,
     return updated
 
 
+def _row_get(row, key: str) -> str:
+    """sqlite3.Row / dict 统一的按键取值。"""
+    if isinstance(row, dict):
+        return row.get(key, "")
+    try:
+        if key in row.keys():
+            return row[key]
+    except (IndexError, KeyError):
+        return ""
+    return ""
+
+
+def _download_title(row: dict) -> str:
+    """从作品行（sqlite3.Row 或 dict）取下载文件名用的标题：优先原始标题
+    title_original，回退 title_pretty，再回退 title（兼容早期未补全详情的行）。"""
+    if not row:
+        return ""
+    return (str(_row_get(row, "title_original") or "").strip()
+            or str(_row_get(row, "title_pretty") or "").strip()
+            or str(_row_get(row, "title") or "").strip())
+
+
 def get_title(gallery_id: int, path: str | Path | None = None, fallback: str = "") -> str:
-    """取作品标题（优先简洁标题），用于生成下载文件名。"""
+    """取作品原始标题用于生成下载文件名：优先 title_original（上游原始作品名），
+    缺则 title_pretty，再缺 title。"""
     gid = _optional_int(gallery_id) or 0
     if gid <= 0:
         return fallback
     conn = connect(path)
     try:
         row = conn.execute(
-            "SELECT title_pretty, title FROM galleries WHERE gallery_id = ?", (gid,)
+            "SELECT title_original, title_pretty, title FROM galleries WHERE gallery_id = ?", (gid,)
         ).fetchone()
     finally:
         conn.close()
     if not row:
         return fallback
-    value = (row["title_pretty"] or row["title"] or "").strip()
+    value = (row["title_original"] or row["title_pretty"] or row["title"] or "").strip()
     return value or fallback

@@ -70,6 +70,7 @@ _route("POST", "/api/download/cancel")(download.post_download_cancel)
 _route("POST", "/api/download/enqueue")(download.post_download_enqueue)
 _route("POST", "/api/download/jobs/cancel")(download.post_download_jobs_cancel)
 _route("POST", "/api/download/jobs/clear-failed")(download.post_download_jobs_clear_failed)
+_route("POST", "/api/download/rename-files")(download.post_rename_files)
 
 # ---------- favorites ----------
 _route("POST", "/api/favorites/sync")(favorites.post_favorites_sync)

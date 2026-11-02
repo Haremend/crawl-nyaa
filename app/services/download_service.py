@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import mimetypes
 import os
+import re
 import threading
 from pathlib import Path
 from urllib.parse import quote
@@ -58,14 +59,15 @@ def content_disposition(filename: str) -> str:
 
 # ---------- 云端标题（与 server._cloud_title 等价；不依赖 2b 的 cloud_service）----------
 def cloud_title(username: str, gallery_id: int) -> str:
-    """云模式取作品标题（title_pretty 优先，缺则 title）；取不到返回空串。"""
+    """云模式取作品原始标题（title_original 优先，缺则 title_pretty / title）。"""
     username = (username or "").strip()
     if not username:
         return ""
     try:
         for r in supabase_client.cloud_fetch_gallery_rows(username):
             if int(r.get("gallery_id") or 0) == int(gallery_id):
-                return (str(r.get("title_pretty") or "").strip()
+                return (str(r.get("title_original") or "").strip()
+                        or str(r.get("title_pretty") or "").strip()
                         or str(r.get("title") or "").strip())
     except supabase_client.SupabaseError:
         return ""
@@ -236,7 +238,8 @@ def _cloud_want_targets(username: str, *, skip_downloaded: bool) -> list[dict]:
         main = ordered[0]
         targets.append({
             "gallery_id": int(main["gallery_id"]),
-            "title": (main.get("title_pretty") or main.get("title") or ""),
+            "title": (main.get("title_original") or main.get("title_pretty")
+                      or main.get("title") or ""),
         })
     targets.sort(key=lambda t: -t["gallery_id"])
     return targets
@@ -260,7 +263,8 @@ def _cloud_batch_targets(username: str, batch_id: int, *,
         main = ordered[0]
         targets.append({
             "gallery_id": int(main["gallery_id"]),
-            "title": (main.get("title_pretty") or main.get("title") or ""),
+            "title": (main.get("title_original") or main.get("title_pretty")
+                      or main.get("title") or ""),
         })
     targets.sort(key=lambda t: -t["gallery_id"])
     return targets
@@ -314,8 +318,11 @@ def filter_targets(filters: dict, user: dict | None, user_db,
             except (TypeError, ValueError):
                 continue
             if gid > 0:
-                targets.append({"gallery_id": gid,
-                                "title": str(item.get("title") or "")})
+                targets.append({
+                    "gallery_id": gid,
+                    "title": (str(item.get("title_original") or "").strip()
+                              or str(item.get("title") or "")),
+                })
         try:
             pages = int(data.get("pages") or 1)
         except (TypeError, ValueError):
@@ -333,3 +340,131 @@ def validate_key(api_key: str, origin: str) -> dict | None:
         return None
     except UpstreamError as exc:
         return {"error": f"API Key 校验失败：{exc}", "status": exc.status or 401}
+
+
+# ---------- 已下载文件按原始标题重命名 ----------
+_ID_NAME_RE = re.compile(r"^(\d+)_.+\.(zip|cbz|torrent)$", re.IGNORECASE)
+_ID_LEGACY_RE = re.compile(r"^(\d+)\.(zip|cbz|torrent)$", re.IGNORECASE)
+
+
+def _scan_download_files() -> list[Path]:
+    """列出下载目录里的作品文件（{id}_*.ext 与历史 {id}.ext）。"""
+    cache_dir = Path(config.DOWNLOADS_DIR)
+    if not cache_dir.is_dir():
+        return []
+    files: list[Path] = []
+    for entry in cache_dir.iterdir():
+        if not entry.is_file():
+            continue
+        name = entry.name
+        # 跳过批次清单（manifest_batch_* / works_batch_*）与 .part 半成品
+        if name.endswith(".part") or name.startswith("manifest_batch_") \
+                or name.startswith("works_batch_"):
+            continue
+        if _ID_NAME_RE.match(name) or _ID_LEGACY_RE.match(name):
+            files.append(entry)
+    return files
+
+
+def _build_title_map(user: dict | None, user_db, *, cloud_mode: bool) -> dict[int, str]:
+    """gid → 原始标题（title_original 优先）；云/本地双路。"""
+    titles: dict[int, str] = {}
+    if cloud_mode:
+        username = (user.get("username", "") if user else "")
+        try:
+            for r in supabase_client.cloud_fetch_gallery_rows(username):
+                gid = int(r.get("gallery_id") or 0)
+                if gid <= 0:
+                    continue
+                t = (str(r.get("title_original") or "").strip()
+                     or str(r.get("title_pretty") or "").strip()
+                     or str(r.get("title") or "").strip())
+                if t:
+                    titles[gid] = t
+        except supabase_client.SupabaseError:
+            pass
+        return titles
+    conn = db.connect(user_db)
+    try:
+        for row in conn.execute(
+            "SELECT gallery_id, title_original, title_pretty, title FROM galleries"
+        ):
+            gid = int(row["gallery_id"] or 0)
+            if gid <= 0:
+                continue
+            t = (str(row["title_original"] or "").strip()
+                 or str(row["title_pretty"] or "").strip()
+                 or str(row["title"] or "").strip())
+            if t:
+                titles[gid] = t
+    finally:
+        conn.close()
+    return titles
+
+
+def rename_downloaded_files(user: dict | None, user_db, *,
+                            cloud_mode: bool) -> dict:
+    """扫描下载目录，按数据库里的原始标题重命名 {id}_*.{ext} 文件。
+
+    - 命中相同命名（已是 {id}_{原始标题}.{ext}）→ skipped_unchanged
+    - 数据库里查不到该 id → missing
+    - 目标名与现有文件冲突（非自身）→ conflict
+    - 成功改名 → renamed（同步更新 download_jobs.file_path）
+    """
+    files = _scan_download_files()
+    titles = _build_title_map(user, user_db, cloud_mode=cloud_mode)
+    cache_dir = Path(config.DOWNLOADS_DIR)
+    renamed = 0
+    unchanged = 0
+    missing = 0
+    conflicts = 0
+    details: list[dict] = []
+    for entry in files:
+        name = entry.name
+        m = _ID_NAME_RE.match(name) or _ID_LEGACY_RE.match(name)
+        if not m:
+            continue
+        gid = int(m.group(1))
+        ext = m.group(2).lower()
+        if ext not in ("zip", "cbz", "torrent"):
+            continue
+        title = titles.get(gid)
+        if not title:
+            missing += 1
+            details.append({"gallery_id": gid, "from": name, "to": "",
+                            "result": "missing"})
+            continue
+        new_name = download_filename(gid, title, ext)
+        if new_name == name:
+            unchanged += 1
+            continue
+        target = cache_dir / new_name
+        if target.exists() and target.resolve() != entry.resolve():
+            conflicts += 1
+            details.append({"gallery_id": gid, "from": name, "to": new_name,
+                            "result": "conflict"})
+            continue
+        try:
+            entry.rename(target)
+        except OSError as exc:
+            conflicts += 1
+            details.append({"gallery_id": gid, "from": name, "to": new_name,
+                            "result": "error", "error": str(exc)})
+            continue
+        renamed += 1
+        details.append({"gallery_id": gid, "from": name, "to": new_name,
+                        "result": "renamed"})
+        # 同步更新 download_jobs.file_path，保持 DB 一致
+        try:
+            db.update_job_file_path(str(entry), str(target))
+        except Exception:
+            pass
+    return {
+        "ok": True,
+        "renamed": renamed,
+        "unchanged": unchanged,
+        "missing": missing,
+        "conflicts": conflicts,
+        "total": len(files),
+        "items": details,
+    }

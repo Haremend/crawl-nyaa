@@ -235,8 +235,6 @@ function openAuthModal(tab) {
     btn.classList.toggle("active", btn.dataset.authTab === state.authTab));
   $("authSubmit").textContent = state.authTab === "login" ? "登录" : "注册";
   $("authExtra").hidden = state.authTab !== "register";
-  // 「同步云端配置」开关只对登录有效
-  $("syncCredsWrap").hidden = state.authTab !== "login";
   $("authHint").textContent = state.authTab === "login"
     ? "本地无此用户且已配置云端时，会自动从云端拉取账号验证。"
     : "注册后你的账号、站点域名与 API Key 可在云端跨设备同步。";
@@ -244,7 +242,6 @@ function openAuthModal(tab) {
   $("authPassword").value = "";
   $("authSite").value = "";
   $("authKey").value = "";
-  $("syncCredsCheck").checked = false;
   $("authUsername").focus();
 }
 
@@ -256,9 +253,6 @@ async function submitAuth() {
   if (!username || !password) { toast("请填写用户名和密码", "error"); return; }
   const body = { username, password };
   const path = state.authTab === "login" ? "/api/auth/login" : "/api/auth/register";
-  if (state.authTab === "login") {
-    body.sync_creds = $("syncCredsCheck").checked;
-  }
   if (state.authTab === "register") {
     body.site_origin = $("authSite").value.trim();
     body.api_key = $("authKey").value.trim();
@@ -275,11 +269,7 @@ async function submitAuth() {
     const mergeNote = merged && (merged.galleries || 0) > 0
       ? "，已并入 " + merged.galleries + " 条匿名期间的作品" : "";
     if (state.authTab === "login") {
-      // 登录会自动拉取一次远端数据到本地库（§12.5），pulled 为本次新增/合并条数
-      const pulled = (data && data.pulled) || {};
-      const pullNote = (pulled.galleries || 0) > 0
-        ? "，已同步 " + pulled.galleries + " 条远程作品" : "";
-      toast("登录成功" + mergeNote + pullNote, "ok");
+      toast("登录成功" + mergeNote, "ok");
     } else {
       // 注册 toast 区分：是否真正写进了云端
       if (data && data.cloud_error && !data.cloud_registered) {
@@ -426,6 +416,34 @@ async function doSync(direction) {
     toast(error.message, "error");
   } finally {
     btn.disabled = false; other.disabled = false;
+  }
+}
+
+async function renameDownloadedFiles() {
+  if (!state.user) { toast("请先登录", "error"); return; }
+  if (!window.confirm("将按数据库原始标题重命名 download/ 下的作品文件（Windows 非法字符会自动处理）。继续？")) return;
+  const btn = $("renameFilesBtn");
+  btn.disabled = true;
+  $("renameResult").textContent = "正在重命名…";
+  try {
+    const data = await api("/api/download/rename-files", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const lines = [
+      "重命名 " + (data.renamed || 0),
+      "已是规范名 " + (data.unchanged || 0),
+      "数据库无记录 " + (data.missing || 0),
+      "冲突跳过 " + (data.conflicts || 0),
+    ];
+    $("renameResult").textContent = "完成：" + lines.join(" · ");
+    toast("重命名完成：改名 " + (data.renamed || 0) + " / 跳过 " + (data.conflicts || 0), "ok");
+  } catch (error) {
+    $("renameResult").textContent = "重命名失败：" + error.message;
+    toast(error.message, "error");
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -1373,6 +1391,7 @@ function bindEvents() {
   $("settingsClose").addEventListener("click", closeSettingsModal);
   $("settingsSave").addEventListener("click", saveSettings);
   $("pullBtn").addEventListener("click", () => doSync("pull"));
+  $("renameFilesBtn").addEventListener("click", renameDownloadedFiles);
   $("pushBtn").addEventListener("click", () => doSync("push"));
   // 点弹窗遮罩关闭
   $("authModal").addEventListener("click", (event) => { if (event.target.id === "authModal") closeAuthModal(); });

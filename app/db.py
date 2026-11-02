@@ -64,6 +64,7 @@ from .dao.settings import (  # noqa: F401
 from .dao.jobs import (  # noqa: F401
     create_job, update_job, get_job, list_jobs, claim_next_job,
     cancel_job, cancel_queued_jobs, reset_stale_jobs, clear_failed_jobs,
+    update_job_file_path,
 )
 
 # scrape_jobs：抓取队列持久化（重启恢复）

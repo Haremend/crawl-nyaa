@@ -238,17 +238,14 @@ class RemoteSyncTests(_RemoteBase, unittest.TestCase):
         ids = {item["gallery_id"] for item in works["items"]}
         self.assertIn(8001, ids)
 
-    def test_login_auto_pulls_remote_data(self):
-        """登录成功后自动拉取一次远端数据（§12.5）；离线即可查看。
-
-        需求基线 §12.5：登录后自动 pull 远端→本地，best-effort 不阻断登录；
-        推送仍由用户手动点【数据同步】菜单触发。
-        """
+    def test_login_does_not_auto_pull(self):
+        """登录不再自动拉取远端数据（2026-11-02 调整）：只验证身份，
+        远端同步由用户在【设置 → 数据同步】里手动拉取。"""
         _, _, sc = http("POST", self.base, "/api/auth/register",
                          body={"username": "mel", "password": "pass"})
         cookie = session_cookie(sc)
         db.init_db(db.user_db_path("mel"))
-        # 退出后重新登录，模拟「异地登录取回数据」
+        # 退出后重新登录，模拟「异地登录」
         http("POST", self.base, "/api/auth/logout", body={}, cookie=cookie)
         # 预置远端 mel 有一行数据
         self.fake.pull_rows["mel"] = {"galleries": [_cloud_gallery_row(7001)],
@@ -257,30 +254,29 @@ class RemoteSyncTests(_RemoteBase, unittest.TestCase):
         status, data, sc2 = http("POST", self.base, "/api/auth/login",
                                   body={"username": "mel", "password": "pass"})
         self.assertEqual(status, 200)
-        # 登录触发了远端拉取
-        self.assertEqual(self.fake.pull_calls, ["mel"])
-        # 响应带回拉取条数
-        self.assertEqual(data["pulled"]["galleries"], 1)
-        # 离线查看：本地库已有 7001
+        # 登录不触发远端拉取
+        self.assertEqual(self.fake.pull_calls, [])
+        # 响应不再带 pulled 字段
+        self.assertNotIn("pulled", data)
+        # 本地库仍为空（未拉取）
         cookie2 = session_cookie(sc2)
         status, works, _ = http("GET", self.base, "/api/works?per_page=50",
                                  cookie=cookie2)
-        self.assertIn(7001, {i["gallery_id"] for i in works["items"]})
+        self.assertNotIn(7001, {i["gallery_id"] for i in works["items"]})
 
-    def test_login_auto_pull_failure_does_not_block(self):
-        """远端拉取失败不阻断登录（best-effort）。"""
+    def test_login_not_blocked_when_remote_fail(self):
+        """远端不可用不阻断登录（登录只做身份验证）。"""
         _, _, sc = http("POST", self.base, "/api/auth/register",
                          body={"username": "ned", "password": "pass"})
         cookie = session_cookie(sc)
         db.init_db(db.user_db_path("ned"))
         http("POST", self.base, "/api/auth/logout", body={}, cookie=cookie)
-        # 远端拉取抛错
+        # 远端抛错
         self.fake.fail = True
         status, data, _ = http("POST", self.base, "/api/auth/login",
                                 body={"username": "ned", "password": "pass"})
         self.assertEqual(status, 200)
-        # 失败时 pulled 为空，但登录仍成功
-        self.assertEqual(data.get("pulled"), {})
+        self.assertTrue(data.get("ok"))
 
     def test_push_via_remote_sends_local_rows(self):
         _, _, sc = http("POST", self.base, "/api/auth/register",
