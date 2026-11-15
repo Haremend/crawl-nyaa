@@ -1,7 +1,8 @@
 """DAO 抓取队列层：scrape_jobs 表的持久化，支持重启恢复。
 
-scrape_jobs 是「待抓取 URL 队列」的持久化（与 download_jobs 同级，每个用户库
-一张）。start() 入队即 INSERT（status=queued）；worker 取出跑时标 running，
+scrape_jobs 是「待抓取 URL 队列」的持久化。**实例级队列**：与 download_jobs
+同级，按实例的默认库（`ApiServer.db_path` → 生产即 `data/gallery.sqlite3`），
+不分用户。start() 入队即 INSERT（status=queued）；worker 取出跑时标 running，
 跑完标 done/error/cancelled；cancel() 把所有 queued 标 cancelled。重启时
 ``list_pending_scrape_jobs`` 读出 queued + 崩溃残留的 running（先 reset 成
 queued），回填进内存 _queue，实现重启可恢复。

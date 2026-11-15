@@ -138,9 +138,13 @@ class ScrapeProxyTests(unittest.TestCase):
         self.original = config.PROXY_ENABLED
         self.tmp = make_temp_dir("scrapeproxy")
         self.db_path = self.tmp / "t.sqlite3"
+        # 本类用例 stub 的是 HTML 翻页器（iter_pages），显式钉住 html 模式
+        self._mode_backup = config.SCRAPE_MODE
+        config.SCRAPE_MODE = "html"
 
     def tearDown(self):
         config.set_proxy_enabled(self.original)
+        config.SCRAPE_MODE = self._mode_backup
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _run_fake_scrape(self):

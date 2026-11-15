@@ -19,7 +19,9 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from . import config, covers, db, supabase_client
 from .detail import fetch_detail
+from .listing_api import iter_pages_api
 from .scraper import FetchError, Fetcher, iter_pages
+from .upstream import UpstreamClient
 
 
 class ScrapeError(RuntimeError):
@@ -764,20 +766,37 @@ class ScrapeService:
             latest = self.sink.latest_run_for_url(url)
             if latest is not None:
                 stop_at_known = int(latest["run_id"] or 0)
+        api_mode = config.SCRAPE_MODE != "html"
         try:
             # 不要显式传 proxy：让 Fetcher 走 config.effective_proxy()，
             # 否则会绕过页面的「开启代理」开关
             fetcher = Fetcher()
-            for page in iter_pages(
-                url,
-                max_pages=max_pages,
-                delay=delay,
-                fetcher=fetcher,
-                should_stop=self._cancel.is_set,
-                on_log=self._log,
-            ):
+            if api_mode:
+                # 列表页 HTML 被站点 403，主链路走公开搜索接口（app/listing_api.py）
+                origin = f"{urlsplit(url).scheme}://{urlsplit(url).netloc}"
+                pages = iter_pages_api(
+                    url,
+                    api=UpstreamClient(origin),
+                    max_pages=max_pages,
+                    delay=delay,
+                    should_stop=self._cancel.is_set,
+                    on_log=self._log,
+                )
+            else:
+                pages = iter_pages(
+                    url,
+                    max_pages=max_pages,
+                    delay=delay,
+                    fetcher=fetcher,
+                    should_stop=self._cancel.is_set,
+                    on_log=self._log,
+                )
+            for page in pages:
                 if page.page_no == 1 and not page.items:
-                    raise ScrapeError("第一页未解析到任何作品：该分组可能没有作品，或页面结构/请求被拦截（请检查代理是否开启）")
+                    hint = ("该分组/搜索条件可能没有作品（搜索接口返回为空）"
+                            if api_mode else
+                            "该分组可能没有作品，或页面结构/请求被拦截（请检查代理是否开启）")
+                    raise ScrapeError(f"第一页未取到任何作品：{hint}")
                 pages_done = page.page_no
                 if page.last_page:
                     pages_total = min(page.last_page, max_pages) if max_pages else page.last_page

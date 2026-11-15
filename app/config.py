@@ -134,6 +134,11 @@ SUPABASE_TIMEOUT = float(os.environ.get("CLAW_SUPABASE_TIMEOUT", "30") or 30)
 SUPABASE_TABLE_PREFIX = (os.environ.get("CLAW_SUPABASE_TABLE_PREFIX", "claw_") or "claw_").strip()
 # 同步单次最大行数（防止一次请求过大）
 SUPABASE_SYNC_MAX_ROWS = max(100, int(os.environ.get("CLAW_SUPABASE_SYNC_MAX_ROWS", "20000") or 20000))
+# 抓取数据源：api（默认）走公开搜索接口 /api/v2/search 取列表；
+# html 是旧的 HTML 列表页解析路径（站点对主域 HTML 返回 403 后仅作应急回退）。
+SCRAPE_MODE = (os.environ.get("CLAW_SCRAPE_MODE", "") or "api").strip().lower()
+if SCRAPE_MODE not in ("api", "html"):
+    SCRAPE_MODE = "api"
 # Postgres 直连基址（预留）：当前传输层走 Management API（CLAW_SUPABASE_API_URL
 # + 账号级 PAT）。CLAW_SUPABASE_DB_URL 是未来若改用 psycopg 走 Postgres TCP
 # 时的项目基址（默认由 ref 推导 https://<ref>.supabase.co），暂未被使用。

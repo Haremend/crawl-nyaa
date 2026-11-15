@@ -8,7 +8,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from app import db, server as server_module, scrape_service as service_module
+from app import config, db, server as server_module, scrape_service as service_module
 from app.server import ApiServer, Handler
 from app.parser import GalleryItem
 from app.scraper import PageResult
@@ -94,8 +94,12 @@ class IncrementalScrapeTests(unittest.TestCase):
         self.db_path = self.tmp / "t.sqlite3"
         self.db_path.parent.mkdir(exist_ok=True)
         db.init_db(self.db_path)
+        # 本类用例 stub 的是 HTML 翻页器（iter_pages），显式钉住 html 模式
+        self._mode_backup = config.SCRAPE_MODE
+        config.SCRAPE_MODE = "html"
 
     def tearDown(self):
+        config.SCRAPE_MODE = self._mode_backup
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _fake_iter_pages(self, pages):

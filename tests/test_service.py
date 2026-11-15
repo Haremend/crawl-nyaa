@@ -60,8 +60,13 @@ class ServiceStartTests(unittest.TestCase):
     def setUp(self):
         self.tmp = make_temp_dir("service")
         self.db_path = self.tmp / "test.sqlite3"
+        # 本类用例 stub 的是 HTML 翻页器（iter_pages），显式钉住 html 模式；
+        # API 模式（生产默认）的抓取链路由 tests/test_scrape_api.py 覆盖
+        self._mode_backup = config.SCRAPE_MODE
+        config.SCRAPE_MODE = "html"
 
     def tearDown(self):
+        config.SCRAPE_MODE = self._mode_backup
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_start_returns_quickly_with_reentrant_lock(self):

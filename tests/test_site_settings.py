@@ -111,6 +111,8 @@ class ScrapeDetailCoverPathTests(unittest.TestCase):
             calls["cover_site_domain"] = site_domain
             return None
 
+        original_mode = config.SCRAPE_MODE
+        config.SCRAPE_MODE = "html"   # 本用例 stub 的是 HTML 翻页器（iter_pages）
         service_module.iter_pages = fake_iter_pages
         service_module.fetch_detail = fake_fetch_detail
         covers_module.download_cover = fake_download_cover
@@ -127,6 +129,7 @@ class ScrapeDetailCoverPathTests(unittest.TestCase):
             service_module.fetch_detail = original_fetch_detail
             covers_module.download_cover = original_download_cover
             config.set_proxy_enabled(True)
+            config.SCRAPE_MODE = original_mode
 
         self.assertEqual(snapshot["status"], "done",
                          f"抓取不应失败：{snapshot.get('error')}")

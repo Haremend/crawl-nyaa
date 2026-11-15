@@ -121,7 +121,8 @@
 | --- | --- | --- |
 | `run.py` | 启动入口（参数解析 + 起服务） | 无业务逻辑 |
 | `app/config.py` | 全部配置与环境变量（`CLAW_*`） | 域名**不写死**在这里 |
-| `app/parser.py` | 列表页 HTML 解析（`HTMLParser` + 正则降级） | 语言来自卡片 `lang-xx` class |
+| `app/parser.py` | 列表页 HTML 解析（`HTMLParser` + 正则降级） | 语言来自卡片 `lang-xx` class；仅 `CLAW_SCRAPE_MODE=html` 时使用 |
+| `app/listing_api.py` | 列表抓取数据源：列表页 URL → `/api/v2/search` → `PageResult` | 默认路径；搜索/标签是公开接口，**不带 Key**；缩略图必须走 `t.<host>` 子域 |
 | `app/scraper.py` | HTTP 抓取（代理、重试、限速、翻页生成器） | `fetch_raw` / `request` 供全项目复用 |
 | `app/detail.py` | 详情 API 客户端（原始标题、标签、页数） | 公开接口，**不带 Key** |
 | `app/upstream.py` | 需要 Key 的上游接口（收藏、下载、账号） | §1.4 的 Key 规则在这里实现 |
@@ -259,6 +260,10 @@ node --check web/app.js
    不要把它当成单纯删除批次；测试批次过滤时要意识到条目已归属到最新批次。
 10. **隐藏记录仍参与「已收录」判定**
     隐藏只是展示 / 下载层面过滤，去重判定必须带上隐藏行，否则重抓会把它重新插入。
+11. **主域名对 HTML 页面与图片路径一律 403（2026-11-15 实测）**
+    列表抓取必须走 `/api/v2/search`（`app/listing_api.py`，默认数据源）；
+    缩略图相对路径必须拼 `t.<host>` 子域（`https://t.<host>/galleries/…`，实测 200），
+    拼主域同样 403。详情 API 的 `_thumbnail_url()` 之前就是 `t.` 规则，别改回主域。
 
 ---
 
@@ -327,6 +332,7 @@ grep -rnoE '[A-Za-z]{2,6}_[A-Za-z0-9_-]{24,}' --include='*.py' --include='*.js' 
 - 同步默认流程是「拉云端 → 合并本地 → 推回云端」；本地模式无云端配置也必须能工作。
 - 云端不可用时要返回可读错误，不得清空本地数据。
 - `download_jobs` 属于运行时队列，默认不参与跨部署记录同步；下载文件可以跨用户复用，但数据库标记要按用户维护。
+- `scrape_jobs` 同样是**实例级队列**，存实例的默认库（生产即 `data/gallery.sqlite3`）；`ScrapeService` 的 `db_path` 必须显式传实例默认库，不传会回退 `config.DB_PATH`，导致临时库起的实例捡走真实库队列的残留任务。
 
 ### 10.3 正常抓取依然不覆盖
 

@@ -45,14 +45,14 @@ AGENTS.md 是权威约束文件，本文件不重复其内容，只做入口指�
 | controller | `app/controllers/` | 读请求参数 → 调 service → 格式化响应。`routes.py` 是 `(方法,路径)→controller` 路由表 + `dispatch`，`do_GET`/`do_POST` 查表分派。按域拆：auth/settings/works/sync/scrape/download/favorites/assets |
 | service | `app/services/` | 业务编排：cloud/remote/local 分支、上游拉取、下载落盘、收藏同步。八个模块：auth/sync/settings/cloud/works/download/favorites/assets |
 | dao | `app/dao/` | 数据存取：schema/clustering/galleries/runs/users/settings/jobs/cloud_merge。`app/db.py` 是纯 re-export 壳（保持 `db.X` 调用零改动） |
-| 传输/抓取 | `app/supabase_client.py` / `app/remote_client.py` / `app/scraper.py` / `app/detail.py` / `app/upstream.py` / `app/covers.py` | Supabase 管理 API 客户端（PAT）/ 远程 VPS 代理客户端（Bearer）/ HTTP 抓取（代理、重试、翻页）/ 详情 API / 需 Key 的上游接口 / 封面下载 |
+| 传输/抓取 | `app/supabase_client.py` / `app/remote_client.py` / `app/listing_api.py` / `app/scraper.py` / `app/detail.py` / `app/upstream.py` / `app/covers.py` | Supabase 管理 API 客户端（PAT）/ 远程 VPS 代理客户端（Bearer）/ 列表抓取数据源（列表页 URL → `/api/v2/search`，默认；2026-11-15 起 HTML 列表页被站点 403）/ HTTP 抓取（代理、重试、翻页）/ 详情 API / 需 Key 的上游接口 / 封面下载 |
 | 任务服务 | `app/scrape_service.py` / `app/download_queue.py` | 抓取队列（单 worker 串行、可无限入队、取消=停当前+清空队列，锁必须 `RLock`）/ 服务端并发下载队列 |
 
 其余：
 - `run.py` — 启动入口（参数解析 + `db.init_db()` + `ensure_user_dbs()` 起服务），无业务逻辑
 - `app/config.py` — 全部 `CLAW_*` 配置；先加载 `.env`（不覆盖已存在环境变量）
 - `app/server.py` — 内置 `ThreadingHTTPServer` + `Handler`（基础设施：guard、响应工具、静态/封面文件服务、路由分派），~540 行，业务已全下沉到三层
-- `app/parser.py` — 列表页 HTML 解析（`HTMLParser` + 正则降级）；语言来自卡片 `lang-xx` class
+- `app/parser.py` — 列表页 HTML 解析（`HTMLParser` + 正则降级）；语言来自卡片 `lang-xx` class（仅 `CLAW_SCRAPE_MODE=html` 应急路径使用）
 - `app/titles.py` — 标题指纹与「是否同一作品」判定，去重核心算法
 - `app/filenames.py` — 下载文件名净化 `{id}_{原始作品名称}.{ext}`
 - `web/` — 原生单页前端（`index.html`/`app.js`/`style.css`），由后端托管
@@ -82,6 +82,7 @@ AGENTS.md 是权威约束文件，本文件不重复其内容，只做入口指�
 6. 测试里 `apply_details` 只能更新已存在的行，要先 `upsert_items` 再 `apply_details`。
 7. `merge_runs_for_url()` 会改写旧条目的 `batch_id`，不是单纯删批次。
 8. 用户库（`data/users/<名>.sqlite3`）无论云/本地模式都必须 `init_db()` 全表：云模式下业务数据虽走 Supabase，但 `download_jobs`/`settings`（下载队列 + save_credentials + 站点地址回退）仍依赖本地用户库的表存在。历史 bug：云模式 register/登录回退用 `if not storage_is_cloud()` 跳过了 init，导致 `set_setting` 踩 `no such table: settings`。现由注册/登录时无条件 init + `run.py::ensure_user_dbs` 启动兜底保证。
+9. 站点主域对 HTML 列表页和图片路径都返回 403（2026-11-15 实测）：列表抓取默认走 `app/listing_api.py`（`/api/v2/search`，公开接口不带 Key），缩略图必须拼 `t.<host>` 子域；`CLAW_SCRAPE_MODE=html` 只是应急回退。
 
 ## 测试约定
 

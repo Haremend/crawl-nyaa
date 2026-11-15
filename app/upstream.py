@@ -133,6 +133,19 @@ class UpstreamClient:
         data = self._request(f"/galleries/{int(gallery_id)}", auth=False, params=params)
         return data if isinstance(data, dict) else {}
 
+    def search(self, query: str, page: int = 1, sort: str = "") -> dict:
+        """列表搜索（公开接口）：payload 与 /favorites 同构。
+
+        返回 {result: [...], page, num_pages, per_page, total}，供列表抓取
+        （listing_api）映射成卡片数据；单条字段含 id / media_id /
+        english_title / japanese_title / thumbnail / tag_ids / blacklisted 等。
+        """
+        params: dict = {"query": str(query or ""), "page": max(1, int(page or 1))}
+        if sort:
+            params["sort"] = str(sort)
+        data = self._request("/search", auth=False, params=params)
+        return data if isinstance(data, dict) else {}
+
     def resolve_tags(self, tag_ids: list[int]) -> dict[int, UpstreamTag]:
         """批量解析标签 id（公开接口，单次最多 100 个）。"""
         ids = [int(i) for i in tag_ids if i]

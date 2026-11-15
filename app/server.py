@@ -228,7 +228,10 @@ class Handler(BaseHTTPRequestHandler):
         with self.server._scrape_lock:
             svc = self.server._scrape_services.get(key)
             if svc is None:
-                svc = ScrapeService(sink=sink)
+                # db_path 必须跟本实例的默认库走：scrape_jobs 是实例级队列表，
+                # 不传会回退 config.DB_PATH（真实库）——用临时库起的实例/测试
+                # 会读写到真实库的队列，捡走别的实例残留的任务。
+                svc = ScrapeService(db_path=self.server.db_path, sink=sink)
                 self.server._scrape_services[key] = svc
             return svc
 
