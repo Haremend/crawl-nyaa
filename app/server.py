@@ -233,7 +233,11 @@ class Handler(BaseHTTPRequestHandler):
             return svc
 
     def _resolve_api_key(self, query: dict | None, user: dict | None) -> str:
-        """Key 解析顺序：请求头 X-API-Key → ?apikey= → 登录用户保存的 Key。"""
+        """Key 解析顺序：请求头 X-API-Key → ?apikey= → 登录用户保存的 Key → 匿名账号。
+
+        匿名模式兜底读 unlogin_user 账号行（settings 页保存的离线 Key），
+        让离线使用无需任何 cookie 也能带上 Key。
+        """
         header = (self.headers.get("X-API-Key") or "").strip()
         if header:
             return header
@@ -243,13 +247,17 @@ class Handler(BaseHTTPRequestHandler):
                 return str(values[0]).strip()
         if user and user.get("api_key"):
             return str(user["api_key"])
+        if not user:
+            unlogin = db.get_user(config.UNLOGIN_USER, self.server.db_path)
+            if unlogin and unlogin.get("api_key"):
+                return str(unlogin["api_key"])
         return ""
 
     def _site_origin(self, user: dict | None) -> str:
         """当前用户/匿名模式的站点地址。
 
         云模式：读云端账号行 claw_users.site_origin（注册时已写）；
-        本地模式：读本地库 settings.site_origin。
+        本地模式：读本地库 settings.site_origin；匿名兜底读 unlogin_user 账号行。
         """
         if config.storage_is_cloud():
             # 云端账号行已含 site_origin（注册时写入）；读不到再查云端
@@ -263,7 +271,15 @@ class Handler(BaseHTTPRequestHandler):
                 except supabase_client.SupabaseError:
                     return ""
             return ""
-        return db.get_site_origin(self._user_db_path(user))
+        origin = db.get_site_origin(self._user_db_path(user))
+        if origin:
+            return origin
+        # 匿名兜底：settings 读不到时回退 unlogin_user 账号行的 site_origin
+        if not user:
+            row = db.get_user(config.UNLOGIN_USER, self.server.db_path)
+            if row and row.get("site_origin"):
+                return str(row["site_origin"]).rstrip("/")
+        return ""
 
     def _ensure_login(self) -> dict | None:
         """要求登录；未登录返回 None 并发送 401。

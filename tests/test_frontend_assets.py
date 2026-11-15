@@ -14,7 +14,7 @@ class StyleGuardTests(unittest.TestCase):
         self.css = CSS.read_text(encoding="utf-8")
 
     def test_hidden_attribute_takes_effect(self):
-        """[hidden] 必须有 display:none，否则会被 .gate{display:flex} 之类规则覆盖。
+        """[hidden] 必须有 display:none，否则会被 .login-page{display:flex} 之类规则覆盖。
 
         历史 bug：首次进入输入 API Key 后弹层不消失，就是因为缺这条规则。
         """
@@ -24,20 +24,20 @@ class StyleGuardTests(unittest.TestCase):
         )
 
     def test_elements_toggled_by_hidden_are_covered(self):
-        """凡是用 hidden 属性控制显隐、且自身设置了 display 的类，都必须被上面的规则兜住。"""
+        """凡是用 hidden 属性控制显隐的 id，在页面里都必须存在。"""
         js = JS.read_text(encoding="utf-8")
         hidden_ids = set(re.findall(r'\$\("(\w+)"\)\.hidden\s*=', js))
         html = HTML.read_text(encoding="utf-8")
-        self.assertIn("gate", hidden_ids, "门禁层应通过 hidden 属性控制")
+        self.assertIn("loginPage", hidden_ids, "登录页应通过 hidden 属性控制")
         # 这些 id 在页面里存在
         for element_id in hidden_ids:
             self.assertIn('id="%s"' % element_id, html, f"页面缺少 id={element_id}")
 
-    def test_gate_can_be_hidden(self):
-        """门禁层自身用了 display:flex，因此依赖 [hidden] 兜底规则生效。"""
-        gate_block = re.search(r"\.gate\s*\{([^}]*)\}", self.css)
-        self.assertIsNotNone(gate_block, "未找到 .gate 样式")
-        self.assertIn("display: flex", gate_block.group(1).replace("\n", " "))
+    def test_login_page_can_be_hidden(self):
+        """登录页自身用了 display:flex，因此依赖 [hidden] 兜底规则生效。"""
+        login_block = re.search(r"\.login-page\s*\{([^}]*)\}", self.css)
+        self.assertIsNotNone(login_block, "未找到 .login-page 样式")
+        self.assertIn("display: flex", login_block.group(1).replace("\n", " "))
         self.assertIn("display: none !important", self.css)
 
 
@@ -79,19 +79,17 @@ class ScriptGuardTests(unittest.TestCase):
         self.assertIn('api("/api/scrape/status", { silent: true })', self.js)
         self.assertIn('api("/api/download/jobs?limit=60", { silent: true })', self.js)
 
-    def test_gate_does_not_validate_on_submit(self):
-        """门禁提交时不得发起校验请求。
+    def test_offline_entry_does_not_validate_on_submit(self):
+        """离线入口 / 登录提交时不得发起校验请求。
 
         历史 bug：全新部署还没有站点地址，提交 Key 时校验 /api/site-favorites
         会返回「未知站点地址」，导致第一次根本进不去。
         """
-        start = self.js.index("async function submitGate")
+        start = self.js.index("function enterOffline")
         end = self.js.index("function esc(", start)
         body = self.js[start:end]
-        self.assertNotIn("fetch(", body, "submitGate 里不应有网络请求")
-        self.assertNotIn("site-favorites", body, "submitGate 不应校验 Key")
-        self.assertIn("writeCookie", body, "submitGate 应把 Key 存进 cookie")
-        self.assertIn("hideGate()", body, "submitGate 应关闭门禁")
+        self.assertNotIn("fetch(", body, "enterOffline 里不应有网络请求")
+        self.assertNotIn("site-favorites", body, "enterOffline 不应校验 Key")
 
     def test_setup_hint_for_first_deploy(self):
         html = HTML.read_text(encoding="utf-8")

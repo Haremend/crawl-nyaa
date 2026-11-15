@@ -5,7 +5,8 @@
  * ================================================================== */
 const state = {
   key: "",
-  user: null,            // null=未登录；{username, has_api_key, site_origin}
+  user: null,            // null=未登录/离线；{username, has_api_key, site_origin}
+  loggedOut: false,      // 当前是否处于登录页（全屏）
   authTab: "login",      // login / register
   tab: "library",
   q: "",
@@ -101,108 +102,49 @@ function renderSiteChip(origin) {
   $("siteChip").title = value ? "当前使用的站点地址" : "尚未设置站点域名";
 }
 
-/* 顶部「Key」chip：未配置 Key 时显示「未配置 Key」提示，已配置显示「更换 Key」。
-   登录用户的 Key 跟账号走，按其 has_api_key 判断。 */
+/* 顶部「Key」chip：登录与离线模式都点击进入设置弹窗（设置里可明文查看/编辑
+   站点域名与 API Key）。标签固定为「Key」，仅按 has_api_key / state.key 标记
+   是否已配置，未配置时加 unconfigured 样式以示提醒。 */
 function renderKeyChip() {
   const btn = $("changeKeyBtn");
   if (!btn) return;
   const hasKey = state.user ? Boolean(state.user.has_api_key) : Boolean(state.key);
-  if (hasKey) {
-    btn.textContent = "更换 Key";
-    btn.title = state.user ? "在设置里修改站点域名 / API Key" : "清除浏览器里保存的 API Key 并重新输入";
-    btn.classList.remove("unconfigured");
-  } else {
-    btn.textContent = "未配置 Key";
-    btn.title = "尚未配置 API Key：点击填写";
-    btn.classList.add("unconfigured");
-  }
+  btn.textContent = "Key";
+  btn.title = "站点域名 / API Key 设置（明文查看与编辑）";
+  btn.classList.toggle("unconfigured", !hasKey);
 }
 
-function prefillGate(meta) {
-  const origin = (meta && meta.site_origin) || readCookie(SITE_COOKIE) || "";
-  $("gateDomain").value = origin;
-  $("gateInput").value = "";
-  if (origin) { $("gateInput").focus(); } else { $("gateDomain").focus(); }
-}
+/* ==================================================================
+ * 登录页（全屏）：未登录时显示；离线模式直接使用匿名账号 unlogin_user
+ * ================================================================== */
+function openLogin() { $("loginPage").hidden = false; state.loggedOut = true; }
+function closeLogin() { $("loginPage").hidden = true; state.loggedOut = false; }
 
-function showGate(message) {
-  // 每次弹出前预填已知的站点域名 / Key（来自 meta 或 cookie），减少用户重输
-  prefillGate(state.meta);
-  $("gate").hidden = false;
-  $("gateHint").textContent = message || "也可以用 ?apikey=你的KEY 直接进入（进入后会自动从地址栏移除）。";
-  $("gateInput").value = "";
-  $("gateInput").focus();
-}
-
-function hideGate() {
-  $("gate").hidden = true;
-}
-
-function closeGate() {
-  hideGate();
-  toast("已关闭。点击顶部「Key」可重新填写。", "info");
-}
-
-/**
- * 保存 API Key 并进入。
- *
- * 注意：这里**不做任何校验**。全新部署时还没有任何站点地址，
- * 任何需要站点信息的接口都会失败（例如 /api/site-favorites 会返回
- * 「未知站点地址」），如果在这里校验就会导致第一次根本进不去。
- * Key 是否正确，等真正用到（收藏列表 / 下载）时再报错。
- */
-async function submitGate() {
-  const domain = ($("gateDomain").value || "").trim();
-  const key = ($("gateInput").value || "").trim();
-  if (!domain) { toast("请输入站点域名", "error"); $("gateDomain").focus(); return; }
-  if (!key) { toast("请输入 API Key", "error"); $("gateInput").focus(); return; }
-
-  $("gateBtn").disabled = true;
-  // 1) 域名保存到服务端（后端访问站点接口要用），只做格式校验
-  try {
-    const data = await api("/api/settings/site", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ origin: domain }),
-    });
-    state.siteOrigin = data.site_origin || "";
-    writeCookie(SITE_COOKIE, state.siteOrigin);
-    renderSiteChip(state.siteOrigin);
-  } catch (error) {
-    toast("域名无效：" + error.message, "error");
-    $("gateHint").textContent = "域名校验失败：" + error.message;
-    $("gateBtn").disabled = false;
-    return;
-  }
-
-  // 2) API Key 只存浏览器，不在这里校验（此时可能还没抓过任何数据）
-  state.key = key;
-  writeCookie(KEY_COOKIE, key);
-  hideGate();
-  renderKeyChip();
-  toast("已保存域名与 API Key", "ok");
-  try {
-    await reloadAll();
-  } catch (error) {
-    $("gateHint").textContent = "提示：" + error.message;
-  } finally {
-    $("gateBtn").disabled = false;
-  }
+/** 离线模式：进入匿名账号（unlogin_user），由后端持有其站点域名 / API Key。 */
+async function enterOffline() {
+  state.user = null;
+  state.key = "";
+  deleteCookie(KEY_COOKIE);
+  closeLogin();
+  await loadMeta();
+  await loadWorks();
+  toast("已进入离线模式（数据归 unlogin_user）", "ok");
 }
 
 /* ==================================================================
  * 认证：登录 / 注册 / 退出 / 用户设置 / 数据同步
  * ==================================================================
- * 登录后站点域名与 API Key 跟账号走（后端从会话用户读取，不回显完整 Key）；
- * 匿名模式仍用浏览器 cookie 里的 Key + 门禁兼容路径。
+ * 登录用户的站点域名与 API Key 跟账号走（登录时后端会自动同步远程账号配置，
+ * 作品数据仍需手动拉取/推送）；匿名（离线）模式不再走浏览器 Key 门禁，
+ * 后端用 unlogin_user 账号承载匿名模式下的站点域名 / API Key。
  */
 async function loadAuth() {
+  let data = null;
   try {
-    const data = await api("/api/auth/me", { silent: true });
-    state.user = data.logged_in ? data.user : null;
+    data = await api("/api/auth/me", { silent: true });
   } catch (error) {
-    state.user = null;
   }
+  state.user = data && data.logged_in ? data.user : null;
   renderAuth();
   renderKeyChip();
 }
@@ -221,55 +163,56 @@ function renderAuth() {
     $("settingsBtn").addEventListener("click", openSettingsModal);
     if (!cloudMode) $("syncBtnTop").addEventListener("click", openSettingsModal);
     $("logoutBtn").addEventListener("click", logout);
-    hideGate();
+    closeLogin();
   } else {
     area.innerHTML = '<button class="btn primary" id="loginBtn">登录 / 注册</button>';
-    $("loginBtn").addEventListener("click", () => openAuthModal("login"));
+    $("loginBtn").addEventListener("click", openLogin);
   }
 }
 
-function openAuthModal(tab) {
-  state.authTab = tab || "login";
-  $("authModal").hidden = false;
-  document.querySelectorAll(".modal-tab").forEach((btn) =>
+/** 切换登录页的 登录/注册 标签，显示对应输入面板。 */
+function switchAuthTab(tab) {
+  state.authTab = tab === "register" ? "register" : "login";
+  document.querySelectorAll(".login-tab").forEach((btn) =>
     btn.classList.toggle("active", btn.dataset.authTab === state.authTab));
-  $("authSubmit").textContent = state.authTab === "login" ? "登录" : "注册";
-  $("authExtra").hidden = state.authTab !== "register";
-  $("authHint").textContent = state.authTab === "login"
-    ? "本地无此用户且已配置云端时，会自动从云端拉取账号验证。"
-    : "注册后你的账号、站点域名与 API Key 可在云端跨设备同步。";
-  $("authUsername").value = "";
-  $("authPassword").value = "";
-  $("authSite").value = "";
-  $("authKey").value = "";
-  $("authUsername").focus();
+  $("loginPaneLogin").hidden = state.authTab !== "login";
+  $("loginPaneRegister").hidden = state.authTab !== "register";
+  $("loginSubmit").textContent = state.authTab === "login" ? "登录" : "注册";
+  const hint = $("loginHint");
+  if (hint) {
+    hint.textContent = state.authTab === "login"
+      ? "登录用户会自动同步远程账号的站点域名与 API Key；离线使用则进入匿名模式（数据归 unlogin_user）。"
+      : "注册后你的账号、站点域名与 API Key 可在云端跨设备同步。";
+  }
+  const focusId = state.authTab === "login" ? "loginUsername" : "regUsername";
+  if (!$("loginPage").hidden) $(focusId).focus();
 }
 
-function closeAuthModal() { $("authModal").hidden = true; }
-
-async function submitAuth() {
-  const username = $("authUsername").value.trim();
-  const password = $("authPassword").value;
+async function submitLogin() {
+  const username = (state.authTab === "login"
+    ? $("loginUsername").value : $("regUsername").value).trim();
+  const password = state.authTab === "login"
+    ? $("loginPassword").value : $("regPassword").value;
   if (!username || !password) { toast("请填写用户名和密码", "error"); return; }
-  const body = { username, password };
   const path = state.authTab === "login" ? "/api/auth/login" : "/api/auth/register";
+  const body = { username, password };
   if (state.authTab === "register") {
-    body.site_origin = $("authSite").value.trim();
-    body.api_key = $("authKey").value.trim();
+    body.site_origin = $("regSite").value.trim();
+    body.api_key = $("regKey").value.trim();
   }
-  $("authSubmit").disabled = true;
+  $("loginSubmit").disabled = true;
   try {
     const data = await api(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    // 后端登录/注册成功时会把未登录期间（unlogin_user）的数据并入本账号，合并进提示
     const merged = data && data.merged_from_unlogin;
     const mergeNote = merged && (merged.galleries || 0) > 0
       ? "，已并入 " + merged.galleries + " 条匿名期间的作品" : "";
     if (state.authTab === "login") {
-      toast("登录成功" + mergeNote, "ok");
+      // 后端登录成功后已自动同步远程账号的站点域名与 API Key
+      toast("登录成功，已同步远程站点配置" + mergeNote, "ok");
     } else {
       // 注册 toast 区分：是否真正写进了云端
       if (data && data.cloud_error && !data.cloud_registered) {
@@ -280,16 +223,18 @@ async function submitAuth() {
         toast("注册成功" + mergeNote, "ok");
       }
     }
-    closeAuthModal();
+    closeLogin();
     state.key = "";  // 登录后不再依赖浏览器 Key
     deleteCookie(KEY_COOKIE);
     await loadAuth();
-    await reloadAll();
+    await loadMeta();
+    await loadWorks();
   } catch (error) {
     toast(error.message, "error");
-    $("authHint").textContent = error.message;
+    const hint = $("loginHint");
+    if (hint) hint.textContent = error.message;
   } finally {
-    $("authSubmit").disabled = false;
+    $("loginSubmit").disabled = false;
   }
 }
 
@@ -299,23 +244,25 @@ async function logout() {
     toast("已退出登录");
     state.user = null;
     state.key = "";
+    deleteCookie(KEY_COOKIE);
     renderAuth();
+    openLogin();
     await loadMeta().catch(() => {});
-    if (!state.key) {
-      prefillGate(state.meta);
-      showGate();
-    }
   } catch (error) {
     toast(error.message, "error");
   }
 }
 
-function openSettingsModal() {
-  if (!state.user) { openAuthModal("login"); return; }
+async function loadCredentials() {
+  const d = await api("/api/settings/credentials", { silent: true });
+  $("settingsSite").value = d.site_origin || "";
+  $("settingsKey").value = d.api_key || "";
+  return d;
+}
+
+async function openSettingsModal() {
   $("settingsModal").hidden = false;
-  $("settingsUsername").textContent = state.user.username;
-  $("settingsSite").value = state.user.site_origin || "";
-  $("settingsKey").value = "";
+  $("settingsUsername").textContent = state.user ? state.user.username : "unlogin_user";
   $("settingsSite").disabled = false;
   $("settingsKey").disabled = false;
   $("settingsSave").disabled = false;
@@ -334,6 +281,14 @@ function openSettingsModal() {
     if (syncRow) syncRow.style.display = "";
     loadSyncStatus();
   }
+  // 拉取后端持有的当前站点域名 / API Key（明文回显）
+  try {
+    await loadCredentials();
+  } catch (error) {
+    // 读取失败时清空输入框，不阻断弹窗；保存时会以输入值覆盖
+    $("settingsSite").value = state.user ? (state.user.site_origin || "") : "";
+    $("settingsKey").value = "";
+  }
 }
 
 function closeSettingsModal() { $("settingsModal").hidden = true; }
@@ -341,8 +296,7 @@ function closeSettingsModal() { $("settingsModal").hidden = true; }
 async function saveSettings() {
   const site = $("settingsSite").value.trim();
   const key = $("settingsKey").value.trim();
-  const body = { site_origin: site };
-  if (key) body.api_key = key;
+  const body = { api_key: key || "", site_origin: site || "" };
   $("settingsSave").disabled = true;
   try {
     const data = await api("/api/settings/credentials", {
@@ -350,10 +304,10 @@ async function saveSettings() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    state.user.has_api_key = Boolean(data.has_api_key);
-    const note = data.cloud_pushed ? "（已同步到云端）" : (data.cloud_error ? "（云端未同步：" + data.cloud_error + "）" : "");
-    toast("已保存" + note, "ok");
+    if (state.user) state.user.has_api_key = Boolean(data.has_api_key);
     await loadMeta().catch(() => {});
+    renderSiteChip(data.site_origin || site || "");
+    toast("已保存" + (state.user ? "（已同步到远程账号）" : ""), "ok");
   } catch (error) {
     toast(error.message, "error");
   } finally {
@@ -499,6 +453,10 @@ async function api(path, options = {}) {
   const opts = Object.assign({}, options);
   opts.headers = Object.assign({}, options.headers || {});
   if (state.key) opts.headers["X-API-Key"] = state.key;
+  // 强制同源请求携带会话 cookie（claw_session 是 HttpOnly，JS 读不到）：
+  // 某些 origin 不一致 / 代理场景下 fetch 默认可能不带 cookie，登录成功后
+  // 紧跟的 /api/auth/me 就会 logged_in:false，顶栏刷新不出来。显式声明后稳定。
+  if (!opts.credentials) opts.credentials = "same-origin";
   const silent = Boolean(options.silent);
   if (!silent) showLoading(options.loadingText || "加载中…");
   let response;
@@ -511,15 +469,13 @@ async function api(path, options = {}) {
   try { data = await response.json(); } catch (error) { /* 非 JSON */ }
   if (response.status === 401) {
     const cloudMode = state.meta && state.meta.storage_backend === "cloud";
-    // 登录用户的 401 = 保存的 Key 缺失/失效，引导去设置；匿名用户才弹门禁
-    if (state.user) {
-      toast("需要 API Key：请在设置里填写站点域名与 Key", "error");
-      openSettingsModal();
-    } else if (cloudMode) {
-      // 云模式未登录：401 = 必须先登录，不弹 API Key 门禁
-      openAuthModal("login");
+    // 登录模式（已登录，或云模式必须先登录）401 = 会话/登录态问题 → 引导重新登录；
+    // 离线（本地匿名）401 = 缺 API Key → 提示去设置里填写。都不主动弹窗。
+    if (state.user || cloudMode) {
+      toast("会话已过期，请重新登录", "error");
+      if (!state.user) openLogin();
     } else {
-      showGate("需要有效的 API Key 才能继续。");
+      toast("请先在【设置】里填写 API Key", "error");
     }
     throw new Error(data.error || "需要 API Key");
   }
@@ -861,9 +817,11 @@ function renderPager(data) {
  * 我的收藏（站点）
  * ================================================================== */
 async function loadFavorites(page = 1) {
+  const cloudMode = state.meta && state.meta.storage_backend === "cloud";
   if (!state.user && !state.key) {
-    if (state.meta && state.meta.storage_backend === "cloud") { openAuthModal("login"); return; }
-    showGate(); return;
+    if (cloudMode) { toast("云模式需先登录", "error"); openLogin(); return; }
+    toast("请先在【设置】里填写站点域名与 API Key", "error");
+    return;
   }
   const params = new URLSearchParams({ page: String(page) });
   if (state.favQuery) params.set("q", state.favQuery);
@@ -905,9 +863,11 @@ async function setHidden(ids, flag) {
 }
 
 async function syncFavoritesToWant() {
+  const cloudMode = state.meta && state.meta.storage_backend === "cloud";
   if (!state.user && !state.key) {
-    if (state.meta && state.meta.storage_backend === "cloud") { openAuthModal("login"); return; }
-    showGate(); return;
+    if (cloudMode) { toast("云模式需先登录", "error"); openLogin(); return; }
+    toast("请先在【设置】里填写站点域名与 API Key", "error");
+    return;
   }
   if (!window.confirm("将站点账号收藏列表中的全部作品，在本地数据库标记为「待下载」？")) return;
   $("favSyncBtn").disabled = true;
@@ -1364,37 +1324,25 @@ let searchTimer = null;
 let favSearchTimer = null;
 
 function bindEvents() {
-  $("gateBtn").addEventListener("click", submitGate);
-  $("gateInput").addEventListener("keydown", (event) => { if (event.key === "Enter") submitGate(); });
-  const clearKey = (message) => {
-    deleteCookie(KEY_COOKIE);
-    state.key = "";
-    renderKeyChip();
-    toast(message);
-    showGate("已清除保存的 Key，请重新输入。");
-  };
-  $("gateClear").addEventListener("click", () => clearKey("已清除浏览器里保存的 Key"));
-  $("gateClose").addEventListener("click", closeGate);
-  $("changeKeyBtn").addEventListener("click", () => {
-    // 登录用户的 Key 跟账号走，去设置面板改；匿名用户才走清 cookie 门禁
-    if (state.user) { openSettingsModal(); return; }
-    clearKey("已清除保存的 Key，请重新输入");
+  // 登录页：登录/注册标签切换、提交、离线入口
+  document.querySelectorAll(".login-tab").forEach((btn) => {
+    btn.addEventListener("click", () => switchAuthTab(btn.dataset.authTab));
   });
+  $("loginSubmit").addEventListener("click", submitLogin);
+  $("loginPassword").addEventListener("keydown", (event) => { if (event.key === "Enter") submitLogin(); });
+  $("regPassword").addEventListener("keydown", (event) => { if (event.key === "Enter") submitLogin(); });
+  $("offlineBtn").addEventListener("click", () => { enterOffline().catch((e) => toast(e.message, "error")); });
 
-  // 认证 / 设置 / 同步 弹窗
-  document.querySelectorAll(".modal-tab").forEach((btn) => {
-    btn.addEventListener("click", () => openAuthModal(btn.dataset.authTab));
-  });
-  $("authClose").addEventListener("click", closeAuthModal);
-  $("authSubmit").addEventListener("click", submitAuth);
-  $("authPassword").addEventListener("keydown", (event) => { if (event.key === "Enter") submitAuth(); });
+  // 顶部「Key」chip：登录与离线模式都打开设置弹窗（设置里可明文查看/编辑 Key 与站点）
+  $("changeKeyBtn").addEventListener("click", openSettingsModal);
+
+  // 设置 / 同步 弹窗
   $("settingsClose").addEventListener("click", closeSettingsModal);
   $("settingsSave").addEventListener("click", saveSettings);
   $("pullBtn").addEventListener("click", () => doSync("pull"));
   $("renameFilesBtn").addEventListener("click", renameDownloadedFiles);
   $("pushBtn").addEventListener("click", () => doSync("push"));
   // 点弹窗遮罩关闭
-  $("authModal").addEventListener("click", (event) => { if (event.target.id === "authModal") closeAuthModal(); });
   $("settingsModal").addEventListener("click", (event) => { if (event.target.id === "settingsModal") closeSettingsModal(); });
 
   $("proxyBtn").addEventListener("click", async () => {
@@ -1652,31 +1600,19 @@ function bindEvents() {
   renderSaveMode();
   // 先确认登录态：登录用户的站点域名 / Key 跟账号走，不需要门禁
   await loadAuth();
-  // 匿名模式兼容：URL ?apikey= / cookie 里的 Key 仍然可用
+  // 匿名模式兼容：URL ?apikey= / cookie 里的 Key 仍写入 state.key，但不再做门禁
   initApiKey();
   await loadMeta().catch(() => {});
   const cloudMode = state.meta && state.meta.storage_backend === "cloud";
   if (state.user) {
-    hideGate();
+    closeLogin();
     try { await loadWorks(); } catch (error) { toast("加载失败：" + error.message, "error"); }
     return;
   }
-  if (cloudMode) {
-    // 云模式：必须先登录，不弹 API Key 门禁，直接引导到登录/注册
-    hideGate();
-    openAuthModal("login");
-    return;
-  }
-  // 本地模式未登录：不再自动弹门禁（由顶部「未配置 Key / 站点未配置」chip 引导）。
-  // 仅当 URL 带了 ?apikey= 或 cookie 里已有 Key 才直接进入浏览。
-  if (!state.key) {
-    hideGate();
-    // 顶部 chip 此时显示「未配置 Key」/「站点 未配置」，点击即可开门禁补全
-    return;
-  }
-  try {
-    await loadWorks();
-  } catch (error) {
-    toast("加载失败：" + error.message, "error");
-  }
+  // 未登录：显示全屏登录页
+  // 云模式必须先登录 → 隐藏「离线使用」按钮，并给出提示；
+  // 本地模式允许点「离线使用」进入匿名模式（数据归 unlogin_user，站点/Key 在设置里填）。
+  $("offlineBtn").hidden = cloudMode;
+  $("offlineHint").hidden = !cloudMode;
+  openLogin();
 })();

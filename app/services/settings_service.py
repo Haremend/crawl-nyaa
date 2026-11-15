@@ -11,31 +11,54 @@ from app.services.auth_service import normalize_origin
 from app.services._log import cloud_log
 
 
-def get_credentials(user: dict) -> dict:
-    """读当前用户凭据状态（不回显完整 api_key）。"""
-    username = user["username"]
-    return {"ok": True, "username": username,
-            "has_api_key": bool(user.get("api_key")),
-            "site_origin": user.get("site_origin", "")}
+def get_credentials(user: dict | None, db_path, user_db_path) -> dict:
+    """读凭据状态，回显明文 api_key（设置页需要回填表单）。
+
+    登录用户 → mode="account"；匿名/离线 → mode="offline"（读 unlogin_user 账号行
+    + 其用户库 settings.site_origin 兜底）。
+    """
+    if user:
+        mode = "account"
+        username = user["username"]
+    else:
+        mode = "offline"
+        username = config.UNLOGIN_USER
+    row = db.get_user(username, db_path) or {}
+    api_key = str(row.get("api_key") or "")
+    site_origin = str(row.get("site_origin") or "")
+    if not site_origin:
+        site_origin = db.get_setting("site_origin", "", user_db_path)
+    return {"ok": True, "mode": mode, "username": username,
+            "api_key": api_key, "has_api_key": bool(api_key),
+            "site_origin": site_origin}
 
 
-def save_credentials(user: dict, api_key, site_origin, db_path) -> dict:
+def save_credentials(user: dict | None, api_key, site_origin, db_path,
+                    user_db_path) -> dict:
     """保存站点域名 / API Key：本地账号库 + 用户库 settings，best-effort 推云端。
 
-    api_key/site_origin 为 None 表示本次不更新该字段。
+    user 为 None（匿名/离线）时读写 unlogin_user 账号行与其用户库，且**绝不**
+    触碰云端（cloud_pushed 恒 False）。api_key/site_origin 为 None 表示本次不
+    更新该字段。
     """
-    username = user["username"]
-    origin = normalize_origin(str(site_origin)) if site_origin is not None else None
+    if user:
+        mode = "account"
+        username = user["username"]
+    else:
+        mode = "offline"
+        username = config.UNLOGIN_USER
+    normalized_origin = normalize_origin(str(site_origin)) if site_origin is not None else None
     db.update_user_settings(
         username,
         api_key=str(api_key).strip() if api_key is not None else None,
-        site_origin=origin, path=db_path)
-    if origin:
-        db.set_setting("site_origin", origin, db.user_db_path(username))
+        site_origin=normalized_origin, path=db_path)
+    if site_origin is not None:
+        # 写空串清除设置（与旧「origin 非空才写」不同：显式清理由用户触发）
+        db.set_setting("site_origin", normalized_origin or "", user_db_path)
     fresh = db.get_user(username, db_path) or {}
     cloud_pushed = False
     cloud_error = ""
-    if supabase_client.configured():
+    if user and supabase_client.configured():
         try:
             cloud_log(f"保存凭据→Supabase user={username}")
             supabase_client.ensure_tables()
@@ -50,9 +73,10 @@ def save_credentials(user: dict, api_key, site_origin, db_path) -> dict:
         except supabase_client.SupabaseError as exc:
             # 云端不可用时不阻断本地保存
             cloud_error = str(exc)
-    return {"ok": True, "username": username,
+    return {"ok": True, "mode": mode, "username": username,
+            "api_key": str(fresh.get("api_key") or ""),
             "has_api_key": bool(fresh.get("api_key")),
-            "site_origin": fresh.get("site_origin", ""),
+            "site_origin": str(fresh.get("site_origin") or ""),
             "cloud_pushed": cloud_pushed, "cloud_error": cloud_error}
 
 

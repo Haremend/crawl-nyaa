@@ -255,17 +255,27 @@ class AuthAndIsolationTests(unittest.TestCase):
         status, _, _ = http("GET", self.base, "/api/works?per_page=10")
         self.assertEqual(status, 200)
 
-    def test_credentials_not_echo_key(self):
+    def test_credentials_key_echoed_plain(self):
         _, _, sc = http("POST", self.base, "/api/auth/register",
                        body={"username": "erin", "password": "pass", "api_key": "supersecretkey"})
         cookie = session_cookie(sc)
-        # 读设置：只有 has_api_key，不回显原文
+        # 设置页读凭据：回显明文 api_key（用于表单回填）
         status, data, _ = http("GET", self.base, "/api/settings/credentials", cookie=cookie)
         self.assertEqual(status, 200)
+        self.assertEqual(data["mode"], "account")
+        self.assertEqual(data["username"], "erin")
+        self.assertEqual(data["api_key"], "supersecretkey")
         self.assertTrue(data["has_api_key"])
-        self.assertNotIn("api_key", data)
-        # 整个响应序列化里不应出现明文
-        self.assertNotIn("supersecretkey", json.dumps(data))
+        self.assertEqual(data["site_origin"], "")
+
+    def test_credentials_offline_anonymous_read(self):
+        """匿名（无 cookie）读凭据走 offline 模式：unlogin_user 账号行 + 其用户库兜底。"""
+        status, data, _ = http("GET", self.base, "/api/settings/credentials")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["mode"], "offline")
+        self.assertEqual(data["username"], "unlogin_user")
+        self.assertEqual(data["api_key"], "")
+        self.assertFalse(data["has_api_key"])
 
     def test_login_required_for_sync(self):
         status, _, _ = http("POST", self.base, "/api/sync", body={})
@@ -545,15 +555,21 @@ class LoginSyncCredsTests(unittest.TestCase):
         self.assertEqual(user["api_key"], "local-key")
         self.assertEqual(user["site_origin"], "https://local.example.net")
 
-    def test_login_without_switch_keeps_local_creds(self):
+    def test_login_auto_syncs_cloud_creds(self):
+        """登录（无论 sync_creds 开关）自动同步云端账号配置：本地凭据被云端覆盖。"""
         self._register_demo_with_local_creds()
         status, data, _ = http("POST", self.base, "/api/auth/login",
                                body={"username": "demo", "password": "pass1"})
         self.assertEqual(status, 200)
         user = db.get_user("demo", self.db_path)
-        # 未开「同步云端配置」：本地凭据保持 local-*，不被云端 cloud-* 覆盖
-        self.assertEqual(user["api_key"], "local-key")
-        self.assertEqual(user["site_origin"], "https://local.example.net")
+        # 自动同步：本地凭据被云端 cloud-* 覆盖（未传 sync_creds 也触发）
+        self.assertEqual(user["api_key"], "cloud-key")
+        self.assertEqual(user["site_origin"], "https://cloud.example.net")
+        # 站点同步落到用户库 settings：顶栏 chip 走 /api/meta → 本地模式读
+        # settings.site_origin，只写 users 表不会反映到前端
+        user_db = db.user_db_path("demo")
+        self.assertEqual(db.get_setting("site_origin", "", user_db),
+                         "https://cloud.example.net")
 
     def test_login_with_switch_overlays_cloud_creds(self):
         self._register_demo_with_local_creds()
@@ -578,6 +594,26 @@ class LoginSyncCredsTests(unittest.TestCase):
         self.assertEqual(meta["site_origin"], "https://cloud.example.net")
         # 覆盖凭据不能破坏本地密码：原密码仍能验证
         self.assertTrue(db.verify_user("demo", "pass1", self.db_path))
+
+    def test_login_auto_sync_does_not_wipe_when_remote_empty(self):
+        """自动同步遇到远程账号 api_key/site_origin 全空时不擦除本地值。"""
+        self._register_demo_with_local_creds()
+        # 云端账号行：api_key/site_origin 为空，但 hash/salt 有效（=pass1）
+        self.fake.accounts["demo"] = {
+            "username": "demo",
+            "api_key": "",
+            "site_origin": "",
+            "password_hash": self._cloud_hash,
+            "salt": self._cloud_salt,
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+        status, data, _ = http("POST", self.base, "/api/auth/login",
+                               body={"username": "demo", "password": "pass1"})
+        self.assertEqual(status, 200)
+        user = db.get_user("demo", self.db_path)
+        # 远程字段全空：本地凭据保持不变，不被空值擦除
+        self.assertEqual(user["api_key"], "local-key")
+        self.assertEqual(user["site_origin"], "https://local.example.net")
 
     def test_cloud_fallback_rebuild_writes_settings_site(self):
         """云回退重建账号（本地无该账号）：站点同样要落到用户库 settings。"""

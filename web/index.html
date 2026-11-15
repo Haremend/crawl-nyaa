@@ -9,33 +9,49 @@
 </head>
 <body>
 
-<!-- ============ API Key 门禁 ============ -->
-<div class="gate" id="gate" hidden>
-  <div class="gate-card">
-    <button class="gate-close" id="gateClose" aria-label="关闭" title="关闭">✕</button>
-    <h2>需要 API Key</h2>
-    <p class="gate-desc">
-      填写要抓取站点的<strong>域名</strong>与你的 <strong>API Key</strong> 即可进入。<br>
-      域名保存在服务端（后端访问站点接口需要它）；API Key 只保存在你自己的浏览器 cookie 中，不会写入服务端磁盘。
-    </p>
-    <label class="field">
-      <span>站点域名</span>
-      <input id="gateDomain" type="text" spellcheck="false" placeholder="例如 example.com（可带 http:// 或端口）" autocomplete="off">
-    </label>
-    <label class="field">
-      <span>API Key</span>
-      <input id="gateInput" type="password" spellcheck="false" placeholder="在此粘贴 API Key" autocomplete="off">
-    </label>
-    <div class="gate-actions">
-      <button id="gateBtn" class="btn primary">确定进入</button>
-      <button id="gateClear" class="btn ghost">清除已保存的 Key</button>
+<!-- ============ 登录 / 离线入口（全屏） ============ -->
+<section class="login-page" id="loginPage" hidden>
+  <div class="login-card">
+    <h1>claw-gallery</h1>
+    <p class="login-subtitle">作品整理 · 登录或离线使用</p>
+    <div class="login-tabs">
+      <button class="login-tab active" data-auth-tab="login">登录</button>
+      <button class="login-tab" data-auth-tab="register">注册</button>
     </div>
-    <p class="gate-hint" id="gateHint">
-      也可以用 <code>?apikey=你的KEY</code> 直接进入（进入后会自动从地址栏移除）。<br>
-      Key 只保存在你的浏览器里，填写后即可进入；是否有效会在用到站点接口时才提示。
-    </p>
+    <div class="login-pane" id="loginPaneLogin" data-login-pane="login">
+      <label class="field">
+        <span>用户名</span>
+        <input id="loginUsername" type="text" autocomplete="username" placeholder="3-64 个字符">
+      </label>
+      <label class="field">
+        <span>密码</span>
+        <input id="loginPassword" type="password" autocomplete="current-password" placeholder="至少 4 位">
+      </label>
+    </div>
+    <div class="login-pane" id="loginPaneRegister" data-login-pane="register" hidden>
+      <label class="field">
+        <span>用户名</span>
+        <input id="regUsername" type="text" autocomplete="username" placeholder="3-64 个字符">
+      </label>
+      <label class="field">
+        <span>密码</span>
+        <input id="regPassword" type="password" autocomplete="new-password" placeholder="至少 4 位">
+      </label>
+      <label class="field">
+        <span>站点域名（可选）</span>
+        <input id="regSite" type="text" spellcheck="false" placeholder="例如 example.com">
+      </label>
+      <label class="field">
+        <span>API Key（可选，登录后可在设置里补）</span>
+        <input id="regKey" type="text" spellcheck="false" placeholder="留空则稍后在设置里填写">
+      </label>
+    </div>
+    <p class="login-hint" id="loginHint">登录用户会自动同步远程账号的站点域名与 API Key；离线使用则进入匿名模式（数据归 unlogin_user）。</p>
+    <button class="btn primary login-submit" id="loginSubmit">登录</button>
+    <button class="btn login-offline" id="offlineBtn" type="button">离线使用（不登录）</button>
+    <p class="login-cloud-hint" id="offlineHint" hidden>云模式必须先登录才能使用（业务接口不对匿名开放）。</p>
   </div>
-</div>
+</section>
 
 <header class="topbar">
   <div class="brand">
@@ -48,7 +64,7 @@
     <span class="meta-chip" id="dbChip" title="">SQLite</span>
     <span class="meta-chip" id="lastRunChip">暂无抓取记录</span>
     <button class="meta-chip meta-btn" id="proxyBtn" title="切换是否通过本地代理访问（云服务器可关闭直连）">代理：开</button>
-    <button class="meta-chip meta-btn" id="changeKeyBtn" title="清除浏览器里保存的 API Key 并重新输入">更换 Key</button>
+    <button class="meta-chip meta-btn" id="changeKeyBtn" title="站点域名 / API Key 设置">Key</button>
   </div>
   <div class="auth-area" id="authArea">
     <!-- 未登录：登录/注册按钮；已登录：用户名 + 设置 + 同步 + 退出 -->
@@ -254,43 +270,6 @@
 
 <div id="toast" class="toast" hidden></div>
 
-<!-- ============ 登录 / 注册弹窗 ============ -->
-<div class="modal" id="authModal" hidden>
-  <div class="modal-card">
-    <div class="modal-head">
-      <div class="modal-tabs">
-        <button class="modal-tab active" data-auth-tab="login">登录</button>
-        <button class="modal-tab" data-auth-tab="register">注册</button>
-      </div>
-      <button class="modal-close" id="authClose" title="关闭">×</button>
-    </div>
-    <div class="modal-body">
-      <label class="field">
-        <span>用户名</span>
-        <input id="authUsername" type="text" autocomplete="username" placeholder="3-64 个字符">
-      </label>
-      <label class="field">
-        <span>密码</span>
-        <input id="authPassword" type="password" autocomplete="current-password" placeholder="至少 4 位">
-      </label>
-      <div class="auth-extra" id="authExtra" hidden>
-        <label class="field">
-          <span>站点域名（可选）</span>
-          <input id="authSite" type="text" spellcheck="false" placeholder="例如 example.com">
-        </label>
-        <label class="field">
-          <span>API Key（可选，登录后可在设置里补）</span>
-          <input id="authKey" type="password" spellcheck="false" placeholder="留空则稍后在设置里填写">
-        </label>
-      </div>
-      <p class="modal-hint" id="authHint">登录后你的站点域名与 API Key 会跟账号走，不同设备登录无需重输。</p>
-      <div class="modal-actions">
-        <button class="btn primary" id="authSubmit">登录</button>
-      </div>
-    </div>
-  </div>
-</div>
-
 <!-- ============ 用户设置弹窗 ============ -->
 <div class="modal" id="settingsModal" hidden>
   <div class="modal-card">
@@ -299,15 +278,16 @@
       <button class="modal-close" id="settingsClose" title="关闭">×</button>
     </div>
     <div class="modal-body">
-      <p class="modal-hint">登录用户：<b id="settingsUsername"></b></p>
+      <p class="modal-hint">当前账号：<b id="settingsUsername"></b></p>
       <label class="field">
         <span>站点域名</span>
         <input id="settingsSite" type="text" spellcheck="false" placeholder="例如 example.com">
       </label>
       <label class="field">
-        <span>API Key（留空表示不修改已保存的 Key）</span>
-        <input id="settingsKey" type="password" spellcheck="false" placeholder="已保存的 Key 不回显，填了才覆盖">
+        <span>API Key（留空保存表示不修改）</span>
+        <input id="settingsKey" type="text" spellcheck="false" placeholder="当前 API Key（明文显示）" autocomplete="off">
       </label>
+      <p class="modal-hint">站点域名与 API Key 以明文显示，可直接编辑保存；保存后登录用户会自动同步到远程账号（作品数据仍需手动同步）。</p>
       <div class="modal-actions">
         <button class="btn primary" id="settingsSave">保存</button>
       </div>

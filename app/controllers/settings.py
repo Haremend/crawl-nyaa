@@ -5,22 +5,19 @@ from app.services import settings_service
 
 
 def get_credentials(h) -> None:
-    user = h._ensure_login()
-    if not user:
-        return
-    h._json(settings_service.get_credentials(user))
+    user = h._current_user()
+    h._json(settings_service.get_credentials(user, h.server.db_path,
+                                            h._user_db_path(user)))
 
 
 def post_credentials(h) -> None:
-    user = h._ensure_login()
-    if not user:
-        return
+    user = h._current_user()
     payload = h._read_json()
     if payload is None:
         return
     h._json(settings_service.save_credentials(
         user, payload.get("api_key"), payload.get("site_origin"),
-        h.server.db_path))
+        h.server.db_path, h._user_db_path(user)))
 
 
 def post_settings_site(h) -> None:

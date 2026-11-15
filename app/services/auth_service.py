@@ -111,12 +111,17 @@ def _merge_unlogin(username: str) -> dict:
 def login(username: str, password: str, db_path, sync_creds: bool = False) -> dict:
     """登录：本地 verify 优先；失败且（remote 或 supabase 可用）时走云回退。
 
-    sync_creds=True（需求基线 §12.4）：登录成功后用云端账号的 site_origin/api_key
-    覆盖本地该账号行这两个字段；False 时只用本地值，不被云端覆盖。
-    云回退重建（本地无该账号）时云端凭据作为初始值写入（开关语义自然成立）。
+    本地验证通过后**自动 best-effort 同步远程账号配置**（配置级）：
+    - remote VPS 已配置 → 拉 VPS 账号行 site_origin/api_key 覆盖本地；
+    - 否则 Supabase 已配置 → 拉 Supabase 账号行覆盖本地。
+    空远程字段不会擦掉本地值（见 _overlay_cloud_creds）。
 
-    登录**不再自动拉取远端作品数据**：登录只做身份验证 + 匿名数据并入 + 建会话，
-    远端同步由用户在【设置 → 数据同步】里手动拉取/推送（2026-11-02 调整）。
+    sync_creds 参数保留仅为向后兼容，行为不变：无论传 True/False 都会自动
+    同步（2026-11-02 调整）。云回退重建（本地无该账号）时云端凭据作为初始值
+    写入，不再重复 overlay。
+
+    登录**不再自动拉取远端作品数据**：登录只做身份验证 + 匿名数据并入 + 建
+    会话，远端作品同步由用户在【设置 → 数据同步】里手动拉取/推送。
 
     返回 {ok, username, session_token, max_age, error, status}。
     """
@@ -131,17 +136,20 @@ def login(username: str, password: str, db_path, sync_creds: bool = False) -> di
                 and _cloud_login_fallback(username, password, db_path)):
             return {"ok": False, "error": "用户名或密码错误", "status": 401}
         cloud_used = True
-    elif sync_creds and config.remote_configured() is False and supabase_client.configured():
-        # 本地验证通过但开了「同步云端配置」：拉云端账号的凭据覆盖本地
-        _overlay_cloud_creds(username, db_path)
-    elif sync_creds and config.remote_configured():
+    elif config.remote_configured():
+        # 本地验证通过：自动同步远程（VPS）账号配置（best-effort，空值不覆盖）
         _overlay_remote_creds(username, db_path)
+    elif supabase_client.configured():
+        # 本地验证通过：自动同步 Supabase 账号配置（best-effort，空值不覆盖）
+        _overlay_cloud_creds(username, db_path)
     # §12.3：登录成功即把未登录期间（unlogin_user 库）的数据并入本账号
     merged = _merge_unlogin(username)
     token = db.create_session(username, path=db_path)
     max_age = config.SESSION_TTL_HOURS * 3600
+    creds_synced = bool(cloud_used) or bool(
+        local_ok and (config.remote_configured() or supabase_client.configured()))
     return {"ok": True, "username": username, "session_token": token,
-            "max_age": max_age, "creds_synced": bool(sync_creds) or cloud_used,
+            "max_age": max_age, "creds_synced": creds_synced,
             "merged_from_unlogin": merged}
 
 
@@ -192,27 +200,37 @@ def _cloud_login_fallback(username: str, password: str, db_path) -> bool:
 
 
 def _overlay_cloud_creds(username: str, db_path) -> None:
-    """拉云端账号的 site_origin/api_key，覆盖本地该账号行这两个字段（§12.4）。
+    """拉云端账号的 site_origin/api_key，best-effort 覆盖本地该账号行（§12.4）。
 
-    best-effort：云端不可用/无账号时静默跳过，不阻断登录。
+    空远程字段**不会擦掉本地值**：仅当云端账号对应字段非空时才更新该字段。
+    preserve_auth=True：不动 password_hash/salt。云端不可用/无账号/全空时静默
+    跳过，不阻断登录。
     """
     try:
         if config.remote_configured():
             account = remote_client.get_client().fetch_account(username) or {}
         else:
             account = supabase_client.fetch_account(username) or {}
-        if account:
-            db.upsert_user_credentials(
-                username, password_hash="", salt="",
-                api_key=str(account.get("api_key") or ""),
-                site_origin=str(account.get("site_origin") or ""),
-                path=db_path, preserve_auth=True)
-            cloud_origin = str(account.get("site_origin") or "").strip()
-            # 双写用户库 settings：顶栏/meta 的站点读的是 settings 表，
-            # 只写 users 表 chip 不会变；settings 表由 init_db 保证存在
-            if cloud_origin:
-                db.set_setting("site_origin", cloud_origin,
-                               db.user_db_path(username))
+        if not account:
+            return
+        local = db.get_user(username, db_path) or {}
+        # 仅非空才更新，避免远程空值擦掉本地已有的 api_key/site_origin
+        new_key = str(account.get("api_key") or "")
+        new_origin = str(account.get("site_origin") or "").strip()
+        merged_key = new_key if new_key else str(local.get("api_key") or "")
+        merged_origin = new_origin if new_origin else str(local.get("site_origin") or "")
+        if not (new_key or new_origin):
+            # 远程账号两字段全空：什么都不做
+            return
+        db.upsert_user_credentials(
+            username, password_hash="", salt="",
+            api_key=merged_key, site_origin=merged_origin,
+            path=db_path, preserve_auth=True)
+        # 双写用户库 settings：顶栏/meta 的站点读的是 settings 表，
+        # 只写 users 表 chip 不会变；settings 表由 init_db 保证存在
+        if new_origin:
+            db.set_setting("site_origin", new_origin,
+                           db.user_db_path(username))
     except (remote_client.RemoteError, supabase_client.SupabaseError) as exc:
         cloud_log(f"登录同步云端配置失败 user={username}: {exc}")
 
