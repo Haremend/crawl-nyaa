@@ -41,14 +41,46 @@ class RemoteError(RuntimeError):
         self.status = int(status or 0)
 
 
+# ---------- 推送分片：把全量行按请求体大小切成多片（VPS 有 1MB 上限）----------
+
+def _payload_size(username: str, galleries: list, runs: list) -> int:
+    """按 ``_request`` 的序列化方式算请求体字节数（json.dumps 默认 ensure_ascii）。"""
+    return len(json.dumps({"username": username, "direction": "push",
+                           "galleries": galleries, "runs": runs}).encode("utf-8"))
+
+
+def _split_rows(rows: list, budget: int, envelope: int) -> list[list]:
+    """按每行的序列化大小贪心装箱，保证「信封 + 一片」不超过 budget 字节。
+
+    单行本身就超预算时仍单独成片（必然被上游拒收，由调用方报错暴露）。
+    """
+    chunks: list[list] = []
+    current: list = []
+    size = 0
+    for row in rows:
+        # "+2" 是数组元素分隔符 ", "，按每行都算一次属于略保守（不会低估）
+        row_size = len(json.dumps(row).encode("utf-8")) + 2
+        if current and envelope + size + row_size > budget:
+            chunks.append(current)
+            current, size = [], 0
+        current.append(row)
+        size += row_size
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 class RemoteClient:
     """指向一台 claw-nhentai VPS 的最小 HTTP 客户端。"""
 
-    def __init__(self, base=None, *, timeout=None, auth_token=None) -> None:
+    def __init__(self, base=None, *, timeout=None, auth_token=None,
+                 chunk_bytes=None) -> None:
         self.base = (base or config.REMOTE_BASE or "").rstrip("/")
         self.timeout = float(timeout or config.REQUEST_TIMEOUT)
         self.user_agent = config.USER_AGENT
         self.auth_token = (config.REMOTE_AUTH_TOKEN if auth_token is None else auth_token)
+        self.chunk_bytes = int(config.PUSH_CHUNK_BYTES if chunk_bytes is None
+                               else chunk_bytes)
 
     # ---------- 底层请求 ----------
     def _context(self):
@@ -143,19 +175,46 @@ class RemoteClient:
         return data
 
     def push(self, username: str, galleries: list, runs: list) -> dict:
-        """把本地行推给远端做云端合并，返回 {pushed:{galleries,runs}}。"""
+        """把本地行推给远端做云端合并：按请求体大小自动分片，逐片 upsert。
+
+        远端对请求体有上限（本仓库 ``server._read_json`` 为 1MB），一次性推
+        全量在数据量大时必然 413，因此按 ``chunk_bytes``（默认 768KB，可用
+        ``CLAW_PUSH_CHUNK_BYTES`` 调整）把 galleries / runs 分别贪心切块、
+        逐片 POST。云端侧按主键 upsert（同 ``push_user`` 语义），分片与单片
+        等价；中途某片失败时已推的分片保留，重试即可补齐（幂等）。
+        """
+        galleries = list(galleries or [])
+        runs = list(runs or [])
+        envelope = _payload_size(username, [], [])   # username 等固定开销
+        g_chunks = _split_rows(galleries, self.chunk_bytes, envelope)
+        r_chunks = _split_rows(runs, self.chunk_bytes, envelope)
+        if g_chunks and r_chunks and _payload_size(username, g_chunks[0], r_chunks[0]) <= self.chunk_bytes:
+            # 小数据量：批次行搭第一片，保持「单片推送」的旧行为
+            payloads = [(g_chunks[0], r_chunks[0])]
+            payloads += [(g, []) for g in g_chunks[1:]]
+            payloads += [([], r) for r in r_chunks[1:]]
+        elif g_chunks or r_chunks:
+            payloads = [(g, []) for g in g_chunks] + [([], r) for r in r_chunks]
+        else:
+            payloads = [([], [])]   # 空推送也发一次（保持旧行为，远端回 0/0）
+        total = len(payloads)
+        pushed = {"galleries": 0, "runs": 0}
         _log(f"C 端→VPS 推送作品/批次 {self.base} user={username} "
-             f"推送作品={len(galleries)} 批次={len(runs)}")
-        try:
-            res = self._request("POST", "/api/remote/sync",
-                                payload={"username": username, "direction": "push",
-                                         "galleries": galleries, "runs": runs})
-        except RemoteError as exc:
-            _log(f"推送作品/批次失败 user={username}: {exc} (HTTP {exc.status})")
-            raise
-        pushed = res.get("pushed") or {}
-        _log(f"推送完成 user={username} 远端合并 作品={pushed.get('galleries', 0)} 批次={pushed.get('runs', 0)}")
-        return res
+             f"推送作品={len(galleries)} 批次={len(runs)} 分片={total}")
+        for index, (g_chunk, r_chunk) in enumerate(payloads, start=1):
+            try:
+                res = self._request("POST", "/api/remote/sync",
+                                    payload={"username": username, "direction": "push",
+                                             "galleries": g_chunk, "runs": r_chunk})
+            except RemoteError as exc:
+                _log(f"推送分片 {index}/{total} 失败 user={username}: {exc} (HTTP {exc.status})")
+                raise RemoteError(f"第 {index}/{total} 片推送失败：{exc}", exc.status) from exc
+            part = res.get("pushed") or {}
+            pushed["galleries"] += int(part.get("galleries") or 0)
+            pushed["runs"] += int(part.get("runs") or 0)
+        _log(f"推送完成 user={username} 远端合并 作品={pushed['galleries']} "
+             f"批次={pushed['runs']} 分片={total}")
+        return {"ok": True, "username": username, "pushed": pushed, "chunks": total}
 
 
 # ============================================================

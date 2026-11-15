@@ -11,6 +11,8 @@ import shutil
 import threading
 import unittest
 import uuid
+# 注意：本模块有 def http(...) 辅助函数，不能用 import http.server（会被遮蔽）
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from app import db, config, remote_client, supabase_client
@@ -72,6 +74,7 @@ class FakeRemoteClient:
         self.pull_calls = []
         self.push_calls = []
         self.fail = False    # 置 True 时所有方法抛 RemoteError
+        self.fail_push = False  # 置 True 时仅 push 抛 RemoteError（拉取仍成功）
 
     def _maybe_fail(self):
         if self.fail:
@@ -104,6 +107,8 @@ class FakeRemoteClient:
 
     def push(self, username, galleries, runs):
         self._maybe_fail()
+        if self.fail_push:
+            raise remote_client.RemoteError("模拟推送故障", 502)
         self.push_calls.append((username, galleries, runs))
         return {"ok": True, "username": username,
                 "pushed": {"galleries": len(galleries), "runs": len(runs)}}
@@ -300,6 +305,135 @@ class RemoteSyncTests(_RemoteBase, unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(data["configured"])
         self.assertTrue(data.get("via_remote"))
+
+    def test_full_sync_push_failure_returns_clean_error(self):
+        """全量 /api/sync 里推送失败要返回 502 + error，不能是未捕获异常变 500。
+
+        历史 bug：sync() 的 push 调用没包 try/except（只剩 pull 有），
+        推送失败时 RemoteError 直接穿透到 Handler 兜底，前端只看到
+        「服务器内部错误」而不是「远程 VPS 推送失败：...」。
+        """
+        _, _, sc = http("POST", self.base, "/api/auth/register",
+                         body={"username": "ivy", "password": "pass"})
+        cookie = session_cookie(sc)
+        db.init_db(db.user_db_path("ivy"))
+        self.fake.fail_push = True
+        status, data, _ = http("POST", self.base, "/api/sync", body={}, cookie=cookie)
+        self.assertEqual(status, 502)
+        self.assertFalse(data.get("ok"))
+        self.assertIn("推送失败", data.get("error", ""))
+
+
+class _FakeVpsServer:
+    """模拟 VPS 的 /api/remote/sync：与 server._read_json 相同的 1MB 请求体上限。
+
+    超过上限直接 413（不进业务逻辑，与真实 VPS 行为一致）；否则记录请求体
+    字节数与内容，按行数返回 pushed 计数。
+    """
+
+    def __init__(self):
+        self.requests = []   # 每片 {"body_bytes": int, "galleries": [...], "runs": [...]}
+        self.fail_after = 0  # >0 时：第 N 片之后的所有分片返回 500
+        self._server = None
+        self._thread = None
+        self.base = ""
+
+    def start(self):
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):  # 静默，避免刷测试输出
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                if length > 1024 * 1024:
+                    outer._respond(self, 413, {"ok": False, "error": "请求体过大"})
+                    return
+                raw = self.rfile.read(length) if length else b""
+                payload = json.loads(raw or b"{}")
+                outer.requests.append({
+                    "body_bytes": len(raw),
+                    "galleries": payload.get("galleries") or [],
+                    "runs": payload.get("runs") or [],
+                })
+                if outer.fail_after and len(outer.requests) > outer.fail_after:
+                    outer._respond(self, 500, {"ok": False, "error": "模拟分片故障"})
+                    return
+                outer._respond(self, 200, {
+                    "ok": True, "username": payload.get("username"),
+                    "pushed": {"galleries": len(payload.get("galleries") or []),
+                                "runs": len(payload.get("runs") or [])}})
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        self.base = f"http://127.0.0.1:{self._server.server_address[1]}"
+        return self
+
+    @staticmethod
+    def _respond(handler, status, payload):
+        body = json.dumps(payload).encode("utf-8")
+        handler.send_response(status)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+
+    def stop(self):
+        if self._server:
+            self._server.shutdown()
+            self._server.server_close()
+            self._thread.join(timeout=5)
+
+
+class PushChunkingTests(unittest.TestCase):
+    """真实 RemoteClient 对模拟 VPS：推送必须按请求体大小自动分片。
+
+    历史问题：推送把本地全量行塞进一个请求体，数据量一大就撞 VPS 的
+    1MB 请求体上限（_read_json 413）——本地库 1300+ 行时 ≈ 2.2MB 必然失败。
+    """
+
+    def setUp(self):
+        self.vps = _FakeVpsServer().start()
+        self.client = remote_client.RemoteClient(base=self.vps.base, auth_token="")
+
+    def tearDown(self):
+        self.vps.stop()
+
+    @staticmethod
+    def _big_rows(count, size=2000):
+        return [{"gallery_id": i, "title": "x" * size} for i in range(count)]
+
+    def test_large_push_splits_under_vps_limit(self):
+        rows = self._big_rows(700)   # 约 1.4MB，远超 VPS 的 1MB 上限
+        res = self.client.push("zoe", rows, [{"url": "https://example.net/r/"}])
+        self.assertTrue(res["ok"])
+        self.assertGreaterEqual(len(self.vps.requests), 2, "超限的推送必须分片")
+        for req in self.vps.requests:
+            self.assertLessEqual(req["body_bytes"], 1024 * 1024,
+                                 "每一片都不能撞上 VPS 的 1MB 上限")
+        sent = [row["gallery_id"] for req in self.vps.requests for row in req["galleries"]]
+        self.assertEqual(sorted(sent), list(range(700)), "每个作品行恰好推送一次")
+        self.assertEqual(res["pushed"]["galleries"], 700)
+        self.assertEqual(res["pushed"]["runs"], 1, "批次行也要推到")
+
+    def test_small_push_single_request(self):
+        res = self.client.push("zoe", [{"gallery_id": 1}], [{"url": "u"}])
+        self.assertEqual(len(self.vps.requests), 1, "小数据量不分片，保持单片推送")
+        self.assertEqual(res["pushed"], {"galleries": 1, "runs": 1})
+
+    def test_empty_push_still_sends_one_request(self):
+        res = self.client.push("zoe", [], [])
+        self.assertEqual(len(self.vps.requests), 1)
+        self.assertEqual(res["pushed"], {"galleries": 0, "runs": 0})
+
+    def test_chunk_failure_reports_chunk_index(self):
+        self.vps.fail_after = 1
+        with self.assertRaises(remote_client.RemoteError) as ctx:
+            self.client.push("zoe", self._big_rows(700), [])
+        self.assertEqual(ctx.exception.status, 500)
+        self.assertIn("第 2/", str(ctx.exception), "错误信息要能定位失败的片")
 
 
 def _make_item(gid, title="Work", language="japanese"):

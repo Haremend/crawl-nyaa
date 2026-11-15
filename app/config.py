@@ -175,6 +175,10 @@ REMOTE_BASE = (os.environ.get("CLAW_REMOTE_BASE", "") or "").strip().rstrip("/")
 # 可选共享密钥：VPS 与本地 .env 填同一个值；本地请求带 Authorization: Bearer，
 # VPS 校验不匹配则 403。两侧都为空时 /api/remote/* 开放（不推荐）。
 REMOTE_AUTH_TOKEN = (os.environ.get("CLAW_REMOTE_AUTH_TOKEN", "") or "").strip()
+# 推送分片：单个 /api/remote/sync 请求体的目标字节上限（默认 768KB）。
+# VPS 的 _read_json 对请求体有 1MB 硬上限（server.py），本地数据量再大也只是
+# 分片数变多，不会撞限；默认值留约 25% 余量。
+PUSH_CHUNK_BYTES = max(64 * 1024, int(os.environ.get("CLAW_PUSH_CHUNK_BYTES", "") or 768 * 1024))
 
 
 def remote_configured() -> bool:

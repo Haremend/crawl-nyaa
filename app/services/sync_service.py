@@ -111,9 +111,12 @@ def sync(user: dict) -> dict:
             pulled_r = db.upsert_run_rows_from_cloud(res.get("runs", []), user_db)
         except remote_client.RemoteError as exc:
             return {"ok": False, "error": f"远程 VPS 拉取失败：{exc}", "status": 502}
-        res2 = remote_client.get_client().push(
-            username, db.all_gallery_rows(user_db)[:config.SUPABASE_SYNC_MAX_ROWS],
-            db.all_run_rows(user_db)[:config.SUPABASE_SYNC_MAX_ROWS])
+        try:
+            res2 = remote_client.get_client().push(
+                username, db.all_gallery_rows(user_db)[:config.SUPABASE_SYNC_MAX_ROWS],
+                db.all_run_rows(user_db)[:config.SUPABASE_SYNC_MAX_ROWS])
+        except remote_client.RemoteError as exc:
+            return {"ok": False, "error": f"远程 VPS 推送失败：{exc}", "status": 502}
         return {"ok": True, "username": username,
                 "pulled": {"galleries": pulled_g, "runs": pulled_r},
                 "pushed": res2.get("pushed", {}),
