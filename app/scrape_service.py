@@ -179,7 +179,7 @@ class CloudSink(ScrapeSink):
         """把 GalleryItem / 收藏行 / 详情行转成云端 galleries 行（列与本地 galleries 对齐）。"""
         raw = dict(item.as_row()) if hasattr(item, "as_row") else dict(item)
         gid = int(raw.get("gallery_id") or 0)
-        langs = [str(x).lower() for x in _as_list(raw.get("languages")) if str(x).strip()]
+        langs = config.clean_languages(raw.get("languages"))
         return {
             "gallery_id": gid,
             "media_id": raw.get("media_id"),
@@ -270,17 +270,23 @@ class CloudSink(ScrapeSink):
             base = self._pending.get(gid) or {"gallery_id": gid, "last_seen": now}
             base["detail_fetched_at"] = now
             for col in ("media_id", "title_pretty", "title_original", "original_key", "thumbnail",
-                        "languages", "primary_language", "tags", "artists", "groups", "parodies",
+                        "tags", "artists", "groups", "parodies",
                         "characters", "categories", "scanlator", "uncensored", "num_pages",
                         "num_favorites", "upload_date"):
                 value = raw.get(col)
                 if value in (None, ""):
                     continue
-                if col in ("languages", "tags", "artists", "groups", "parodies",
+                if col in ("tags", "artists", "groups", "parodies",
                            "characters", "categories"):
                     base[col] = json_dumps_list(value)
                 else:
                     base[col] = value
+            # primary_language 随清洗后的 languages 重算，避免详情刷新语言后主语言残留旧值；
+            # 空列表不覆盖（与本地 apply_details 的 CASE 守卫一致）
+            langs = config.clean_languages(raw.get("languages"))
+            if langs:
+                base["languages"] = json_dumps_list(langs)
+                base["primary_language"] = langs[0]
             self._pending[gid] = base
             count += 1
         if count:
@@ -394,10 +400,6 @@ def json_dumps_list(value) -> str:
     else:
         items = []
     return _json.dumps(items, ensure_ascii=False)
-
-
-def _as_list(value) -> list:
-    return list(value) if isinstance(value, (list, tuple)) else []
 
 
 class ScrapeService:

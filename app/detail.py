@@ -13,6 +13,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from . import config
 from .scraper import FetchError, Fetcher
 from .titles import title_meta
 
@@ -20,8 +21,8 @@ def detail_api_url(site_domain: str, gallery_id: int) -> str:
     """根据列表页域名拼接详情 API 地址。"""
     return f"https://{site_domain}/api/v2/galleries/{gallery_id}"
 
-# 这些"语言"标签是标记而不是语言，过滤时直接忽略
-LANGUAGE_PSEUDO_TAGS = {"translated", "speechless", "text cleaned", "rewrite"}
+# 翻译标记而非语言（translated 等），过滤时忽略；单一事实来源在 config。
+LANGUAGE_PSEUDO_TAGS = frozenset(config.LANGUAGE_PSEUDO_TAGS)
 
 TAG_BUCKETS = {
     "artist": "artists",

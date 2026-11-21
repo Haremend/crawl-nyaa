@@ -17,7 +17,7 @@ from __future__ import annotations
 # 曾用 db.config 取到 config 模块。这里保留同名引用，行为与拆分前一致。
 from . import config  # noqa: F401
 from .dao.schema import (  # noqa: F401
-    SCHEMA, MIGRATIONS, utc_now, connect, init_db,
+    SCHEMA, MIGRATIONS, utc_now, connect, init_db, self_heal_languages,
     _WRITE_LOCK, _chunks, _optional_int,
     _GALLERY_COLUMNS, _GALLERY_INT_COLUMNS, _GALLERY_MARK_COLUMNS,
     _GALLERY_CONTENT_COLUMNS, _RUN_COLUMNS, _RUN_INT_COLUMNS,

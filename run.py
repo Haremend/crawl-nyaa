@@ -35,6 +35,28 @@ def ensure_user_dbs() -> None:
     for path in user_paths:
         db.init_db(path)
     print(f"[启动] 数据检查   ：已为 {len(user_paths)} 个用户库确保全表")
+    _heal_languages(user_paths)
+
+
+def _heal_languages(user_paths) -> None:
+    """启动自愈：清洗历史脏语言数据并打印修复结果。
+
+    历史 bug：列表抓取路径不过滤伪语言标签（translated / speechless 等），
+    导致部分作品的 languages 混入伪标签、primary_language 被顶掉，
+    中文作品在优先级排序里被压到英文之后。启动时对默认库与全部用户库
+    做一次幂等修复（入库路径已修复，这里只负责存量数据）。
+    """
+    healed = db.self_heal_languages(config.DB_PATH)
+    detail = []
+    for path in user_paths:
+        fixed = db.self_heal_languages(path)
+        healed += fixed
+        if fixed:
+            detail.append(f"{Path(path).name}: {fixed} 条")
+    if healed:
+        print(f"[启动] 语言自愈   ：共修复 {healed} 条脏语言数据（{'；'.join(detail)}）")
+    else:
+        print("[启动] 语言自愈   ：未发现脏语言数据（无需修复）")
 
 
 def _ensure_unlogin_user() -> None:

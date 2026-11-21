@@ -272,6 +272,28 @@ DEFAULT_LANGUAGE_ORDER = ("japanese", "chinese", "english")
 # 选版/排序的语言优先级（用户要求：日语 > 中文 > 英文 > 其他）
 LANGUAGE_PRIORITY = {"japanese": 0, "chinese": 1, "english": 2}
 
+# 这些"语言"标签其实是翻译标记而不是语言（站点把它们挂在 language 类型下）。
+# 持久化写入边界（本地/云端 upsert、详情合并）统一用 clean_languages 过滤；
+# 历史脏数据由 db.self_heal_languages 在启动时自愈、cloud_repair_languages 手动修复。
+LANGUAGE_PSEUDO_TAGS = {"translated", "speechless", "text cleaned", "rewrite"}
+
+
+def clean_languages(languages) -> list:
+    """剔除语言列表里的伪语言标签（如 translated），保持原顺序并去重。
+
+    所有写 galleries.languages / primary_language 的边界（本地 upsert、
+    详情合并、云端入库、云端详情合并）都经过这里，防止伪标签顶掉
+    primary_language（它 = languages[0]，直接决定选版/排序）。
+    """
+    cleaned: list = []
+    for value in (languages or []):
+        if value is None:
+            continue
+        slug = str(value).strip().lower()
+        if slug and slug not in LANGUAGE_PSEUDO_TAGS and slug not in cleaned:
+            cleaned.append(slug)
+    return cleaned
+
 
 def language_label(slug: str) -> str:
     """把语言 slug（如 english）转换成展示名。"""

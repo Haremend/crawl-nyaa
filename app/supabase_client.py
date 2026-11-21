@@ -675,3 +675,81 @@ def reset_user_data(username) -> dict:
         f'delete from public.{_q(RUNS_TABLE)} where "username" = {name}')
     return {"galleries": len(g) if isinstance(g, list) else 0,
             "runs": len(r) if isinstance(r, list) else 0}
+
+
+def _pseudo_language_where() -> str:
+    """脏语言行的匹配条件（Postgres）：primary_language 是伪标签，或 languages 含伪标签。"""
+    pseudo = sorted(config.LANGUAGE_PSEUDO_TAGS)
+    primary_in = ", ".join(_literal(p) for p in pseudo)
+    lang_like = " or ".join(
+        f"lower(coalesce(\"languages\", '')) like { _literal('%' + p + '%')}"
+        for p in pseudo)
+    return (f'(lower(coalesce("primary_language", \'\')) in ({primary_in}) '
+            f'or {lang_like})')
+
+
+def cloud_repair_languages(username: str | None = None, *, chunk: int = 100,
+                            apply: bool = False) -> dict:
+    """修复云端历史脏语言数据：剔除伪语言标签并重算 primary_language。
+
+    旧代码在列表抓取路径不过滤伪语言标签（translated / speechless 等），
+    云端存过两种脏数据：languages 里混入伪标签，或 primary_language 被
+    伪标签顶掉（languages 干净但主语言错）——后者会让中文作品在排序里被
+    压到英文之后。
+
+    - apply=False（默认）干跑：只算需修复的行，不写库；
+    - apply=True：按 username 分块拼 CASE WHEN UPDATE（主键定位，只改
+      languages / primary_language 两列）；幂等，已干净的行不回写。
+    返回 {scanned, would_fix, fixed, applied}。
+    """
+    _require_config()
+    user_filter = f'"username" = {_literal(str(username))} and ' if username else ""
+    scanned = run_sql(
+        f'select "username", "gallery_id", "languages", "primary_language" '
+        f'from public.{_q(GALLERIES_TABLE)} '
+        f'where {user_filter}{_pseudo_language_where()}',
+        read_only=True)
+    rows = [r for r in (scanned or [])
+            if db._optional_int(r.get("gallery_id"))] if isinstance(scanned, list) else []
+
+    fixed_rows: list[tuple[str, int, str, str]] = []
+    for row in rows:
+        stored = str(row.get("languages") or "[]")
+        try:
+            raw_list = json.loads(stored) if stored and stored != "[]" else []
+            if not isinstance(raw_list, list):
+                raw_list = [raw_list]
+        except ValueError:
+            continue   # 非法 JSON 不碰
+        cleaned = config.clean_languages(raw_list)
+        new_blob = json.dumps(cleaned, ensure_ascii=False)
+        old_primary = str(row.get("primary_language") or "unknown")
+        if new_blob == stored and old_primary not in config.LANGUAGE_PSEUDO_TAGS:
+            continue   # LIKE 命中子串但清洗后无变化（不重写）
+        new_primary = cleaned[0] if cleaned else (
+            "unknown" if old_primary in config.LANGUAGE_PSEUDO_TAGS else old_primary)
+        fixed_rows.append((str(row.get("username") or ""), int(row.get("gallery_id")),
+                           new_blob, new_primary))
+
+    fixed = 0
+    if apply:
+        size = max(1, int(chunk))
+        for start in range(0, len(fixed_rows), size):
+            part = fixed_rows[start:start + size]
+            lang_cases = " ".join(
+                f'when "username" = {_literal(u)} and "gallery_id" = {gid} '
+                f'then {_literal(blob)}' for u, gid, blob, _ in part)
+            primary_cases = " ".join(
+                f'when "username" = {_literal(u)} and "gallery_id" = {gid} '
+                f'then {_literal(primary)}' for u, gid, _, primary in part)
+            where_keys = " or ".join(
+                f'("username" = {_literal(u)} and "gallery_id" = {gid})'
+                for u, gid, _, _ in part)
+            run_sql(
+                f'update public.{_q(GALLERIES_TABLE)} '
+                f'set "languages" = case {lang_cases} else "languages" end, '
+                f'"primary_language" = case {primary_cases} else "primary_language" end '
+                f'where {where_keys}')
+            fixed += len(part)
+    return {"scanned": len(rows), "would_fix": len(fixed_rows),
+            "fixed": fixed, "applied": apply}

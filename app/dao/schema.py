@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -211,6 +212,62 @@ def init_db(path: str | Path | None = None) -> None:
         # 列补齐后再建索引（新库列已存在，旧库刚 ALTER 过），两条路径都不会失败
         conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_username ON download_jobs(username)")
         conn.commit()
+    finally:
+        conn.close()
+
+
+def self_heal_languages(path: str | Path | None = None) -> int:
+    """自愈：清洗 galleries 里残留的伪语言标签（translated 等）并同步 primary_language。
+
+    历史数据在「列表抓取不过滤伪标签」的旧代码下入过库（languages 里混入
+    translated，且 primary_language 被它顶到首位），导致中文作品排序被压到
+    英文之后。本函数在启动时对已存在的库做一次幂等修复：
+
+    - 预筛出 languages 或 primary_language 含伪标签的候选行（修复过一遍后
+      候选为 0，重复启动几乎零开销）；
+    - 逐行用 ``config.clean_languages`` 剔除伪标签，仅当这两列确实变化才回写，
+      不触碰 title / 标记 / 批次等其它字段；幂等。
+
+    返回被修复的行数（0 表示库本身干净）。云端数据由 cloud_repair_languages 修复。
+    """
+    pseudo = sorted(config.LANGUAGE_PSEUDO_TAGS)
+    like_filters = " OR ".join(
+        "lower(languages) LIKE ? OR lower(primary_language) = ?" for _ in pseudo)
+    params: list[str] = []
+    for tag in pseudo:
+        params.extend([f"%{tag}%", tag])
+    conn = connect(path)
+    try:
+        with _WRITE_LOCK:
+            rows = conn.execute(
+                f"SELECT gallery_id, languages, primary_language FROM galleries "
+                f"WHERE {like_filters}",
+                params).fetchall()
+            fixed = 0
+            for row in rows:
+                stored = str(row["languages"] or "[]")
+                try:
+                    raw_list = json.loads(stored) if stored and stored != "[]" else []
+                    if not isinstance(raw_list, list):
+                        raw_list = [raw_list]
+                except ValueError:
+                    continue   # 非 JSON 的历史脏数据不碰（与本 bug 无关）
+                cleaned = config.clean_languages(raw_list)
+                new_blob = json.dumps(cleaned, ensure_ascii=False)
+                old_primary = str(row["primary_language"] or "unknown")
+                # 预筛可能 LIKE 命中子串但实际无变化（如语言名恰好含某伪标签词），
+                # 这里再精确判定，只有真需要改才写；避免误改与幂等。
+                if new_blob == stored and old_primary not in config.LANGUAGE_PSEUDO_TAGS:
+                    continue
+                new_primary = cleaned[0] if cleaned else (
+                    "unknown" if old_primary in config.LANGUAGE_PSEUDO_TAGS else old_primary)
+                conn.execute(
+                    "UPDATE galleries SET languages = ?, primary_language = ? "
+                    "WHERE gallery_id = ?",
+                    (new_blob, new_primary, row["gallery_id"]))
+                fixed += 1
+            conn.commit()
+            return fixed
     finally:
         conn.close()
 

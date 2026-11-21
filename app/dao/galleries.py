@@ -106,7 +106,7 @@ def _json_list(value: Any) -> str:
 
 
 def _params_from_row(gid: int, row: dict, source_url: str, now: str) -> dict:
-    languages = [str(entry).lower() for entry in _as_list(row.get("languages")) if str(entry).strip()]
+    languages = config.clean_languages(row.get("languages"))
     return {
         "gallery_id": gid,
         "media_id": _optional_int(row.get("media_id")),
@@ -365,7 +365,7 @@ def apply_details(details: Iterable[Any], path: str | Path | None = None) -> int
                 gid = _optional_int(row.get("gallery_id")) or 0
                 if gid <= 0:
                     continue
-                languages = [str(entry).lower() for entry in _as_list(row.get("languages")) if str(entry).strip()]
+                languages = config.clean_languages(row.get("languages"))
                 params = {
                     "gallery_id": gid,
                     "media_id": _optional_int(row.get("media_id")),
